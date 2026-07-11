@@ -1,2 +1,6 @@
-tornado>=6.4,<7
+fastapi>=0.115,<1
+httpx>=0.28,<1
+uvicorn>=0.34,<1
 python-magic>=0.4.27,<1
+python-multipart>=0.0.18,<1
+websockets>=14

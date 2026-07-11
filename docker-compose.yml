@@ -9,9 +9,8 @@ services:
     volumes:
       - gotify-data:/app/data
 
-  gateway:
-    build: .
-    image: gotify-e:latest
+  gotify-gw:
+    image: zerocustom/gotify-e:latest
     restart: unless-stopped
     ports:
       - 8765:8765
@@ -25,7 +24,3 @@ services:
       - uploads-data:/data
     depends_on:
       - gotify
-
-volumes:
-  gotify-data:
-  uploads-data:

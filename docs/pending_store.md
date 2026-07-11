@@ -1,0 +1,107 @@
+# pending_store.py — Pending File State Machine
+
+Manages files moved to the pending directory during DELETE interception. Provides an append-only manifest log with CRUD operations, file move/restore, and time-based expiry.
+
+## Class: `PendingStore`
+
+Instantiated once in `delete_handler.py` as `_store`:
+
+```python
+_store = PendingStore(upload_dir, pending_dir, pending_timeout_seconds)
+```
+
+### Manifest Format
+
+Stored at `{pending_dir}/manifest.jsonl`, one JSON object per line:
+
+```jsonl
+{"msg_id":1,"orig_path":"ab/cd/abc_photo.png","pending_path":"20260709/ab_cd_abc_photo.png","time":"2026-07-09T12:00:00","status":"moved"}
+{"msg_id":2,"orig_path":"ef/01/def_doc.pdf","pending_path":"20260709/ef_01_def_doc.pdf","time":"2026-07-09T12:01:00","status":"deleted"}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `msg_id` | int | Gotify message ID |
+| `orig_path` | str | Path relative to `upload_dir` (source before move) |
+| `pending_path` | str | Path relative to `pending_dir` (destination after move) |
+| `time` | str | ISO 8601 timestamp of when the entry was created |
+| `status` | str | `moved` (DELETE not yet confirmed) / `deleted` (DELETE confirmed) |
+
+### Methods
+
+#### `move_to_pending(msg_id, files) -> list[dict]`
+
+Moves files from `upload_dir` to `pending_dir/{date}/`. Uses `os.rename()` — metadata-only, no disk copy.
+
+| Input | Behaviour |
+|---|---|
+| File exists | `os.rename` → entry added to returned list |
+| File missing | Warning logged, silently skipped |
+| `path` empty | Silently skipped |
+| `OSError` during rename | Error logged, entry not included |
+
+Files from the same batch share a single date subdirectory (`YYYYMMDD`). The flat filename replaces `/` with `_` to avoid nested subdirectories inside pending.
+
+#### `restore(entries)`
+
+Reverses `move_to_pending` — moves files back from `pending_dir` to `upload_dir`. Missing pending files are silently skipped.
+
+#### `append_manifest(msg_id, moved)`
+
+Appends entries to `manifest.jsonl`. Each entry is timestamped and initialized with `status: "moved"`.
+
+#### `read_manifest() -> list[dict]`
+
+Reads all entries from `manifest.jsonl`. Returns an empty list if the file does not exist or is empty. Malformed JSON lines are silently dropped.
+
+#### `update_status(msg_ids, new_status)`
+
+Updates the `status` field for all entries matching any of the given `msg_ids`. Rewrites the entire manifest file. No-op if manifest does not exist.
+
+#### `remove_entries(msg_ids)`
+
+Removes all entries whose `msg_id` is in the given list. Rewrites the entire manifest file.
+
+#### `clean_expired(now=None)`
+
+Scans the manifest and removes entries older than `pending_timeout_seconds`.
+
+| Parameter | Default | Behaviour |
+|---|---|---|
+| `now` | `time.time()` | Injects a reference timestamp for deterministic testing |
+
+For each expired entry: the pending file is deleted (`Path.unlink(missing_ok=True)`) and the manifest entry is dropped. Non-expired entries are preserved.
+
+#### `async safe_delete(msg_ids, files_by_id, delete_coro)`
+
+High-level transaction that combines move, execute, and rollback:
+
+```python
+await store.safe_delete(
+    msg_ids=[1, 2],
+    files_by_id={1: [{"path": "ab/cd/uuid_photo.png", ...}], ...},
+    delete_coro=proxy_to_backend(request, method="DELETE", http_client=client),
+)
+```
+
+| Phase | Action |
+|---|---|
+| Prepare | `move_to_pending()` + `append_manifest()` for each msg_id in `files_by_id` |
+| Execute | Awaits `delete_coro` (the actual HTTP DELETE) |
+| Rollback | If response status is not 200/204 and files were moved: `restore()` + `remove_entries()` |
+
+Returns the response from `delete_coro`. Callers no longer need to handle rollback logic.
+
+## Directory Layout
+
+```
+upload_dir/
+├── ab/cd/uuid_photo.png          ← normal stored files
+└── ...
+
+pending_dir/                      ← created on first move
+├── manifest.jsonl                ← append-only log
+└── 20260709/
+    ├── ab_cd_uuid_photo.png      ← moved file (flattened path)
+    └── ...
+```

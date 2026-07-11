@@ -25,4 +25,4 @@ HEALTHCHECK --interval=10s --start-period=10s --timeout=5s --retries=3 \
     CMD python3 -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/version')" || exit 1
 
 ENTRYPOINT ["/app/docker.sh"]
-CMD ["python3", "app.py"]
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8765", "--proxy-headers"]
