@@ -6,57 +6,41 @@
 
 | Part | What | How to use |
 |---|---|---|
-| **PART 1: EnvConfig** | Environment-variable config (7 fields) | Constructed once via `load_env_config()` at app startup. Module-level derived constants exported for direct import. |
-| **PART 2: GatewayConfig** | Hard-coded tunables (image extensions, gateway dir name) | Imported by modules that need them: `from config import GatewayConfig` |
-| **PART 3: Derived** | Computed from EnvConfig + GatewayConfig | `MAX_UPLOAD`, `UPLOAD_DIR` (Path), `GATEWAY_DIR`, `MARKER_PREFIX` — exported as module-level constants |
+| **EnvConfig** | Environment-variable config (9 fields) | Constructed via `load_env_config()` at app startup. |
+| **GatewayConfig** | Hard-coded design constants (storage paths, file safety, version) | Imported directly: `from config import GatewayConfig` |
+| **`load_env_config()`** | Factory function that reads env vars and returns `EnvConfig` | Called once at startup in `app.py` |
 
-## EnvConfig Fields (PART 1)
+## EnvConfig Fields
 
 | Env variable | Field | Default | Description |
 |---|---|---|---|
 | `GOTIFY_BACKEND` | `gotify_backend` | `http://localhost:8080` | Gotify backend base URL. Trailing slash stripped. |
-| `PUBLIC_URL` | `public_url` | `""` | Public gateway URL for file URL rewriting. Auto-detected from request headers when empty. |
+| `PUBLIC_HOST` | `public_host` | `""` | Public gateway domain whitelist (comma-separated) for file URL rewriting. Empty = auto-detect from request headers. |
 | `HOST` | `host` | `0.0.0.0` | Listen address. |
 | `PORT` | `port` | `8765` | Listen port. |
-| `UPLOAD_DIR` | `upload_dir` | `/data` | File upload storage path. Separated from `/app` for storage/compute decoupling. |
-| `STORED_MARKER` | `stored_marker` | `{gateway}` | Placeholder prefix stored in message bodies. Replaced with `PUBLIC_URL` on read. |
 | `MAX_UPLOAD_MB` | `max_upload_mb` | `50` | Per-file upload size limit in megabytes. |
+| `MAX_FILES_PER_REQUEST` | `max_files_per_request` | `5` | Maximum number of files allowed per upload request. |
+| `PENDING_TIMEOUT_MINUTES` | `pending_timeout_minutes` | `120` | How long files stay in pending before cleanup removes them. |
+| `CLEANUP_INTERVAL_MINUTES` | `cleanup_interval_minutes` | `30` | Interval for periodic cleanup sweep. |
+| `DELETE_CONCURRENCY` | `delete_concurrency` | `10` | Max concurrent GET requests during app-level bulk delete. |
 
-## GatewayConfig (PART 2)
+## GatewayConfig
 
 | Constant | Value | Description |
 |---|---|---|
-| `IMAGE_EXTS` | `{".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg", ".bmp", ".ico"}` | File extensions treated as images (rendered as `![](...)` in messages). |
+| `UPLOAD_DIR` | `"/data/upload"` | Permanent file storage directory. The only directory users should mount as a volume. |
+| `STAGING_DIR` | `"/data/staging"` | Temporary upload staging directory. Derived from storage design — files saved here first, moved to upload_dir after Gotify confirms. |
+| `PENDING_DIR` | `"/data/pending"` | Staging directory for files pending DELETE confirmation. |
+| `STORED_MARKER` | `"{gateway}"` | Placeholder prefix stored in message bodies. Replaced with gateway URL on read. |
+| `MAX_FILENAME_BYTES` | `200` | Maximum filename byte length (truncated to fit, extension preserved). |
+| `IMAGE_EXTS` | `{".jpg", ".jpeg", ".png", ".gif", ...}` | File extensions treated as images (rendered as `![](...)` in messages). |
+| `DANGEROUS_EXTS` | `{".html", ".htm", ".js", ...}` | Extensions that force `Content-Disposition: attachment` to prevent in-browser rendering XSS. |
 | `GATEWAY_DIR_NAME` | `"_gateway"` | Directory name for gateway static assets (i18n scripts). |
-
-## Derived Constants (PART 3)
-
-| Constant | Derivation | Example value |
-|---|---|---|
-| `BASE_DIR` | `Path(__file__).parent.resolve()` | `/app` |
-| `cfg` | `load_env_config()` | `EnvConfig(...)` |
-| `BACKEND` | `cfg.gotify_backend` | `http://localhost:8080` |
-| `PUBLIC_URL` | `cfg.public_url` | `http://example.com:8765` |
-| `HOST` | `cfg.host` | `0.0.0.0` |
-| `PORT` | `cfg.port` | `8765` |
-| `UPLOAD_DIR` | `Path(cfg.upload_dir)` | `Path("/data")` |
-| `GATEWAY_DIR` | `BASE_DIR / GATEWAY_DIR_NAME` | `Path("/app/_gateway")` |
-| `MAX_UPLOAD` | `cfg.max_upload_mb * 1024 * 1024` | `52428800` |
-| `IMAGE_EXTS` | `GatewayConfig.IMAGE_EXTS` | `{".png", ".jpg", ...}` |
-| `STORED_MARKER` | `cfg.stored_marker` | `{gateway}` |
-| `MARKER_PREFIX` | `{stored_marker}/uploads/` | `{gateway}/uploads/` |
-
-## Usage
-
-```python
-# Modules import only what they need
-from config import BACKEND, UPLOAD_DIR, MAX_UPLOAD
-
-# Or import the full config object for programmatic access
-from config import cfg
-# cfg.host, cfg.port, cfg.max_upload_mb, ...
-```
 
 ## `__repr__` Security
 
-`EnvConfig.__repr__` automatically masks any field whose name contains `password` or `secret` (case-insensitive) — displays `"******"` instead of the actual value when non-empty.
+`EnvConfig.__repr__` masks sensitive fields (`gotify_backend`, `public_host`) with `"******"` to prevent credential leakage in logs.
+
+## Module-level vs Class-level
+
+Prior to v1.1.0, storage paths and VERSION were module-level constants or part of `EnvConfig`. They were moved into `GatewayConfig` to clarify the boundary between deployment-configurable parameters and architectural design decisions.

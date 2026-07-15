@@ -1,10 +1,10 @@
 import json
 
-import httpx
 import pytest
 
 from proxy import (
     RealHttpClient,
+    _strip_gateway_extras,
     build_backend_url,
     build_gateway_url,
     format_error,
@@ -62,20 +62,28 @@ class TestBuildBackendUrl:
 
 
 class TestBuildGatewayUrl:
-    def test_uses_public_url_when_set(self):
-        from config import load_env_config
-        cfg = load_env_config()
-        assert cfg.public_url == "http://gw-test:8765"
-
-    def test_fallback_without_public_url(self, monkeypatch):
+    def test_whitelist_match(self):
         import proxy
-        monkeypatch.setattr(proxy, "_PUBLIC_URL", "")
+        conn = MockConn(headers={"Host": "gw-test:8765"})
+        url = build_gateway_url(conn)
+        assert url == "http://gw-test:8765"
+
+    def test_whitelist_no_match(self, monkeypatch):
+        import proxy
+        monkeypatch.setattr(proxy, "_PUBLIC_HOST", "allowed.example.com")
+        conn = MockConn(headers={"Host": "evil.com"})
+        url = build_gateway_url(conn)
+        assert url == ""
+
+    def test_fallback_without_public_host(self, monkeypatch):
+        import proxy
+        monkeypatch.setattr(proxy, "_PUBLIC_HOST", "")
         url = build_gateway_url(MockConn())
         assert "localhost" in url
 
     def test_x_forwarded_proto(self, monkeypatch):
         import proxy
-        monkeypatch.setattr(proxy, "_PUBLIC_URL", "")
+        monkeypatch.setattr(proxy, "_PUBLIC_HOST", "")
         conn = MockConn(headers={"X-Forwarded-Proto": "https", "Host": "gw.example.com"})
         url = build_gateway_url(conn)
         assert url == "https://gw.example.com"
@@ -140,7 +148,7 @@ class TestInjectGatewayInfo:
         result = inject_gateway_info(original)
         data = json.loads(result)
         assert data["_gateway"] == "Gotify[e]"
-        assert data["_upload_max"] > 0
+        assert data["_max_files"] > 0
         assert data["version"] == 3
 
     def test_non_json_body(self):
@@ -189,10 +197,10 @@ class TestProxyToBackend:
 
     async def test_strips_origin_header(self, fake_http, any_response):
         fake_http.responses = [any_response(content=b"ok")]
-        req = FakeRequest(method="GET", path="/message", headers={"Origin": "http://evil.com", "Host": "gw"})
+        req = FakeRequest(method="GET", path="/message", headers={"Origin": "http://example.com", "Host": "gw"})
         await proxy_to_backend(req, http_client=fake_http)
         meth, url, headers, body = fake_http.requests[0]
-        assert headers.get("Origin") is None or "Origin" not in str(headers)
+        assert headers.get("Origin") is None
 
     async def test_502_on_connection_error(self, fake_http):
         req = FakeRequest(method="GET", path="/message")
@@ -215,10 +223,72 @@ class TestProxyToBackend:
         resp = await proxy_to_backend(req, http_client=fake_http)
         parsed = json.loads(resp.body)
         assert parsed["_gateway"] == "Gotify[e]"
+        assert parsed["_max_files"] == 5
 
     async def test_rewrites_file_urls_on_message(self, fake_http, any_response):
         body = b"file at {gateway}/uploads/abc.jpg"
         fake_http.responses = [any_response(content=body, headers={"content-type": "application/json"})]
-        req = FakeRequest(method="GET", path="/message")
+        req = FakeRequest(method="GET", path="/message", headers={"Host": "gw-test:8765"})
         resp = await proxy_to_backend(req, http_client=fake_http)
         assert b"http://gw-test:8765/uploads/abc.jpg" in resp.body
+
+
+class TestStripGatewayExtras:
+    def test_strips_gateway_keys(self):
+        body = json.dumps({"message": "hi", "extras": {"client::display": {}, "gateway::files": [{"path": "x"}]}}).encode()
+        result = _strip_gateway_extras(body, "application/json")
+        parsed = json.loads(result)
+        assert "gateway::files" not in parsed["extras"]
+        assert "client::display" in parsed["extras"]
+
+    def test_preserves_non_gateway_keys(self):
+        body = json.dumps({"message": "hi", "extras": {"client::display": {"contentType": "text/markdown"}}}).encode()
+        result = _strip_gateway_extras(body, "application/json")
+        parsed = json.loads(result)
+        assert "client::display" in parsed["extras"]
+
+    def test_returns_unchanged_on_non_json(self):
+        body = b"not json"
+        result = _strip_gateway_extras(body, "text/plain")
+        assert result is body
+
+    def test_returns_unchanged_when_no_gateway_keys(self):
+        body = json.dumps({"message": "hi", "extras": {"foo": "bar"}}).encode()
+        result = _strip_gateway_extras(body, "application/json")
+        assert result is body
+
+    def test_returns_unchanged_on_empty_body(self):
+        result = _strip_gateway_extras(b"", "application/json")
+        assert result == b""
+
+    def test_strips_all_gateway_prefix_keys(self):
+        body = json.dumps({
+            "extras": {"gateway::files": [], "gateway::files_sig": "abc", "client::display": {}}
+        }).encode()
+        result = _strip_gateway_extras(body, "application/json")
+        parsed = json.loads(result)
+        assert "gateway::files" not in parsed["extras"]
+        assert "gateway::files_sig" not in parsed["extras"]
+        assert "client::display" in parsed["extras"]
+
+    @pytest.mark.asyncio
+    async def test_proxy_to_backend_strips_gateway_keys(self, fake_http, any_response):
+        fake_http.responses = [any_response(status_code=200, content=b'{"id":1}')]
+        body = json.dumps({"message": "hi", "extras": {"gateway::files": [{"path": "x"}]}}).encode()
+        req = FakeRequest(method="POST", path="/message", body=body,
+                          headers={"content-type": "application/json"})
+        await proxy_to_backend(req, http_client=fake_http)
+        _, _, _, sent_body = fake_http.requests[0]
+        parsed = json.loads(sent_body)
+        assert "gateway::files" not in parsed.get("extras", {})
+
+    @pytest.mark.asyncio
+    async def test_proxy_to_backend_skips_when_body_explicit(self, fake_http, any_response):
+        fake_http.responses = [any_response(status_code=200, content=b'{"id":1}')]
+        payload = json.dumps({"message": "hi", "extras": {"gateway::files": [{"path": "x"}]}}).encode()
+        req = FakeRequest(method="POST", path="/message")
+        await proxy_to_backend(req, http_client=fake_http, body=payload,
+                               headers={"content-type": "application/json"})
+        _, _, _, sent_body = fake_http.requests[0]
+        parsed = json.loads(sent_body)
+        assert "gateway::files" in parsed.get("extras", {})

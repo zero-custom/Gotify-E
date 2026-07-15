@@ -14,13 +14,13 @@ from proxy import (
     format_error,
     proxy_to_backend,
 )
-from storage import FileStore, FileRejectedError
+from storage import FileStore
 
 log = logging.getLogger("gotify-gateway.upload")
 
 
-class ContentEncodingError(Exception):
-    """Request has unsupported Content-Encoding."""
+class _ContentEncodingError(Exception):
+    pass
 
 
 @dataclass
@@ -36,7 +36,7 @@ async def handle_message_post(
 ) -> JSONResponse:
     try:
         return await _process_upload(request, file_store, http_client)
-    except ContentEncodingError:
+    except _ContentEncodingError:
         return JSONResponse(
             status_code=415,
             content=format_error(415, "compressed upload not supported"),
@@ -45,7 +45,7 @@ async def handle_message_post(
         log.error("handle_message_post failed", exc_info=True)
         return JSONResponse(
             status_code=500,
-            content=format_error(500, f"gateway error: {e}"),
+            content=format_error(500, "Internal server error"),
         )
 
 
@@ -61,7 +61,7 @@ async def _process_upload(
     content_encoding = request.headers.get("content-encoding", "")
     if content_encoding.strip() and content_encoding.strip().lower() != "identity":
         log.warning("rejected compressed upload: content-encoding=%s", content_encoding)
-        raise ContentEncodingError()
+        raise _ContentEncodingError()
 
     form = await request.form(max_part_size=_MAX_UPLOAD)
 
@@ -69,8 +69,22 @@ async def _process_upload(
     title = form.get("title", "")
     priority_raw = form.get("priority", "")
     priority = int(priority_raw) if (priority_raw or "").strip() else 5
+    extras_raw = form.get("extras", "")
+    extras = {}
+    if extras_raw:
+        try:
+            parsed = json.loads(extras_raw)
+            if isinstance(parsed, dict):
+                extras = parsed
+        except json.JSONDecodeError:
+            log.warning("invalid extras JSON in multipart form: %s", extras_raw[:200])
 
     file_fields = form.getlist("file")
+    if len(file_fields) > _cfg.max_files_per_request:
+        return JSONResponse(
+            status_code=413,
+            content=format_error(413, f"Too many files, max {_cfg.max_files_per_request}"),
+        )
     result = await _process_files(file_fields, file_store)
 
     if result.injected_lines:
@@ -81,28 +95,38 @@ async def _process_upload(
         "message": message,
         "title": title,
         "priority": priority,
-        "extras": {
-            "client::display": {"contentType": "text/markdown"},
-        },
+        "extras": extras,
     }
+    payload["extras"]["client::display"] = {"contentType": "text/markdown"}
     if result.stored_files:
         payload["extras"]["gateway::files"] = [
             {"uuid": s.uuid, "path": s.path, "name": s.original_name, "size": s.size}
             for s in result.stored_files
         ]
 
-    proxy_headers = {"Content-Type": "application/json"}
-    token = request.query_params.get("token")
-    if token:
-        proxy_headers["X-Gotify-Key"] = token
+    proxy_headers = {}
+    for k, v in request.headers.items():
+        kl = k.lower()
+        if kl not in ("host", "origin", "content-type", "content-length", "transfer-encoding", "content-encoding"):
+            proxy_headers[kl] = v
+    proxy_headers["content-type"] = "application/json"
 
-    return await proxy_to_backend(
+    resp = await proxy_to_backend(
         request,
         http_client=http_client,
         method="POST",
         headers=proxy_headers,
         body=json.dumps(payload, ensure_ascii=False).encode(),
     )
+
+    if resp.status_code == 200:
+        for sf in result.stored_files:
+            await file_store.confirm(sf)
+    else:
+        for sf in result.stored_files:
+            file_store.cancel(sf)
+
+    return resp
 
 
 async def _process_files(
@@ -126,8 +150,6 @@ async def _process_files(
                 result.injected_lines.append(stored.markdown)
                 result.stored_files.append(stored)
                 log.info("saved %s -> %s (%d bytes)", fname, stored.marker_url, len(content))
-            except FileRejectedError as e:
-                log.info("rejected %s: %s", fname, e)
             except Exception as e2:
                 log.error("unexpected error saving %s", fname, exc_info=True)
 

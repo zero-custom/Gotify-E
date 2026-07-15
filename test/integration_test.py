@@ -8,7 +8,6 @@ Required env vars (or set in .env):
     CLIENT_TOKEN    Gotify client token for management API
 """
 import asyncio
-import json
 import os
 import re
 import sys
@@ -43,9 +42,9 @@ async def version_endpoint(c):
     check("status 200", r.status_code == 200, str(r.status_code))
     data = r.json()
     check("_gateway field", "_gateway" in data)
-    check("_upload_max field", "_upload_max" in data)
+    check("_max_files field", "_max_files" in data)
     check("_gateway value", data.get("_gateway") == "Gotify[e]")
-    check("_upload_max > 0", data.get("_upload_max", 0) > 0)
+    check("_max_files > 0", data.get("_max_files", 0) > 0)
     check("version preserved", "version" in data)
 
 

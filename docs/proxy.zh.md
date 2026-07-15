@@ -45,9 +45,12 @@ class HttpClient(Protocol):
 
 返回网关公网地址，用于文件链接重写。解析顺序：
 
-1. `_PUBLIC_URL`（来自 `PUBLIC_URL` 环境变量）若已设置
-2. `X-Forwarded-Proto` 头 + `Host` 头（处理反向代理场景）
-3. WebSocket URL 协议归一化（ws→http, wss→https）
+1. `PUBLIC_HOST` 已配置 → 从请求头解析候选 URL，检查是否在白名单中：
+   - **匹配**：返回候选 URL（用于标记替换）
+   - **不匹配**：返回 `""`（跳过替换——不暴露内部 URL）
+2. `PUBLIC_HOST` 未配置 → **信任模式**：从请求头自动推断，记录 Host 头注入风险的告警日志
+3. `X-Forwarded-Proto` 头 + `Host` 头（处理反向代理场景）
+4. WebSocket URL 协议归一化（ws→http, wss→https）
 
 ### `is_message_endpoint(path) -> bool`
 
@@ -75,11 +78,15 @@ class HttpClient(Protocol):
 
 ### `inject_gateway_info(output) -> bytes`
 
-向 `/version` 的 JSON 响应中注入 `_gateway` 和 `_upload_max` 字段。若正文非 JSON 或非对象，则直接返回原始输出。
+向 `/version` 的 JSON 响应中注入 `_gateway`、`_upload_max`、`_max_files` 字段。若正文非 JSON 或非对象，则直接返回原始输出。
 
 ### `format_error(status_code, message, backend_url="") -> dict`
 
 返回标准错误字典：`{"error": message, "code": status_code}`。`backend_url` 非空时额外添加 `"backend"` 键。
+
+### Token 脱敏
+
+`log_filter.py` 中的 `TokenSanitizingFilter`（参照 Gotify 2.9.1 的 `tokenRegexp` 模式）在模块级附加到根日志记录器。它使用模式 `token=[^&\s]+` → `token=[masked]` 屏蔽日志消息中的 bearer token 和查询参数 token，防止凭据在应用日志中泄露。
 
 ## 响应转换管道
 
@@ -115,6 +122,20 @@ def my_transform(output, method, path, content_type, request) -> bytes:
 _transforms.append(my_transform)
 ```
 
+## 请求体安全防护
+
+### `_strip_gateway_extras(body, content_type) -> bytes`
+
+剥离代理转发的 JSON 请求体 `extras` 中所有 `gateway::*` 键。仅当请求体来自原始入站请求时生效（不作用于 `upload.py` multipart 处理器显式传入的请求体——那是 `gateway::files` 的合法来源）。
+
+| 条件 | 行为 |
+|---|---|
+| 请求体为空或非 JSON | 原样返回 |
+| `extras` 键以 `gateway::` 开头 | 删除该键，重新编码请求体 |
+| 不存在 `gateway::*` 键 | 原样返回（无重新编码开销） |
+
+此防护防止客户端通过非 multipart 的 `POST /message`、`PUT /message` 或任意代理端点注入 `gateway::files`。结合 `pending_store.py` 的路径格式校验，仅 multipart 上传处理器可以合法创建 `gateway::files` 条目。
+
 ## 核心代理函数
 
 ### `proxy_to_backend(request, http_client, method=None, headers=None, body=None) -> Response`
@@ -125,8 +146,9 @@ _transforms.append(my_transform)
 request
   │
   ├─ 确定方法，构建后端 URL
-  ├─ 过滤请求头（剔除：host, origin, transfer-encoding, content-encoding）
+  ├─ 过滤请求头（剔除：host, transfer-encoding, content-encoding）
   ├─ 读取请求体（仅 POST/PUT/PATCH）
+  ├─ 剥离 JSON 请求体 extras 中的 gateway::* 键（安全防护，见下文）
   ├─ http_client.request(method, backend_url, headers, body)
   │
   ├─ 成功：
@@ -140,8 +162,10 @@ request
 
 | 头过滤 | 方向 | 剔除的头 |
 |---|---|---|
-| 请求头 | 发往后端 | `host`, `origin`, `transfer-encoding`, `content-encoding` |
+| 请求头 | 发往后端 | `host`, `transfer-encoding`, `content-encoding` |
 | 响应头 | 返回客户端 | `transfer-encoding`, `content-encoding`, `alt-svc`, `content-length` |
+
+> 注意：`origin` 已从请求头黑名单中移除。网关作为透明代理必须保留 Origin 头，以便后端自行进行 CORS 校验。
 
 ## 公开接口
 

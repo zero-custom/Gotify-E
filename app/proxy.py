@@ -13,15 +13,12 @@ from config import load_env_config, GatewayConfig
 
 _cfg = load_env_config()
 _BACKEND = _cfg.gotify_backend
-_PUBLIC_URL = _cfg.public_url
+_PUBLIC_HOST = _cfg.public_host
 _PORT = _cfg.port
-_MARKER_PREFIX = f"{_cfg.stored_marker.rstrip('/')}/uploads/"
+_MARKER_PREFIX = f"{GatewayConfig.STORED_MARKER.rstrip('/')}/uploads/"
 _MAX_UPLOAD = _cfg.max_upload_mb * 1024 * 1024
 
 log = logging.getLogger("gotify-gateway.proxy")
-
-
-# ── HttpClient abstraction ──────────────────────────────
 
 
 @dataclass
@@ -77,9 +74,6 @@ class RealHttpClient:
         await self._client.aclose()
 
 
-# ── Endpoint helpers ────────────────────────────────────
-
-
 _MESSAGE_PATHS = {"/message", "/message/"}
 
 
@@ -102,15 +96,37 @@ def build_backend_url(path: str, query: str = "") -> str:
     return url
 
 
-def build_gateway_url(conn: HTTPConnection) -> str:
-    if _PUBLIC_URL:
-        return _PUBLIC_URL
+def _resolve_base_url(conn: HTTPConnection) -> str:
     scheme = conn.headers.get("X-Forwarded-Proto", conn.url.scheme)
     http_scheme = scheme.replace("ws://", "http://").replace("wss://", "https://")
     if http_scheme == scheme:
         http_scheme = scheme.replace("ws", "http").replace("wss", "https")
     host = conn.headers.get("Host", conn.url.hostname or f"localhost:{_PORT}")
     return f"{http_scheme}://{host}"
+
+
+def _host_matches_whitelist(candidate_url: str, whitelist: str) -> bool:
+    if not whitelist:
+        return False
+    from urllib.parse import urlparse
+    candidate_host = urlparse(candidate_url).hostname or ""
+    allowed = []
+    for h in whitelist.split(","):
+        h = h.strip()
+        if not h:
+            continue
+        allowed.append(urlparse(f"//{h}").hostname or h)
+    return candidate_host in allowed
+
+
+def build_gateway_url(conn: HTTPConnection) -> str:
+    if _PUBLIC_HOST:
+        candidate = _resolve_base_url(conn)
+        if _host_matches_whitelist(candidate, _PUBLIC_HOST):
+            return candidate
+        return ""
+    log.warning("PUBLIC_HOST not configured — Host header injection risk unprotected")
+    return _resolve_base_url(conn)
 
 
 def rewrite_file_urls(body: bytes, current_base: str) -> bytes:
@@ -121,14 +137,10 @@ def rewrite_file_urls(body: bytes, current_base: str) -> bytes:
     return text.encode("utf-8")
 
 
-# ── Response injection ─────────────────────────────────
-
-
 def inject_i18n(output: bytes) -> bytes:
     text = output.decode("utf-8")
     script_tag = '<script src="/_gateway/i18n.js"></script>'
 
-    # Pre-compute line start offsets for converting (line, col) → char index
     lines = text.split("\n")
     line_offsets = [0]
     for line in lines[:-1]:
@@ -141,7 +153,7 @@ def inject_i18n(output: bytes) -> bytes:
 
         def handle_endtag(self, tag: str) -> None:
             if tag == "body":
-                lineno, col = self.getpos()  # 1-indexed line, 0-indexed col
+                lineno, col = self.getpos()
                 if 0 < lineno <= len(line_offsets):
                     self.body_end_char = line_offsets[lineno - 1] + col
 
@@ -168,10 +180,34 @@ def inject_gateway_info(output: bytes) -> bytes:
         if isinstance(data, dict):
             data["_gateway"] = "Gotify[e]"
             data["_upload_max"] = _MAX_UPLOAD
+            data["_max_files"] = _cfg.max_files_per_request
             return json.dumps(data, ensure_ascii=False).encode("utf-8")
     except json.JSONDecodeError:
         pass
     return output
+
+
+def _strip_gateway_extras(body: bytes, content_type: str) -> bytes:
+    if not body or "json" not in content_type:
+        return body
+    try:
+        data = json.loads(body)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return body
+    if not isinstance(data, dict):
+        return body
+    extras = data.get("extras")
+    if not isinstance(extras, dict):
+        return body
+    dirty = False
+    for key in list(extras):
+        if key.startswith("gateway::"):
+            del extras[key]
+            dirty = True
+    if not dirty:
+        return body
+    log.info("stripped gateway::* keys from proxied request body")
+    return json.dumps(data, ensure_ascii=False).encode("utf-8")
 
 
 def format_error(status_code: int, message: str, backend_url: str = "") -> dict:
@@ -181,15 +217,12 @@ def format_error(status_code: int, message: str, backend_url: str = "") -> dict:
     return err
 
 
-# ── Response transform pipeline ──────────────────────────
-
-
 _TransformFn = Callable[[bytes, str, str, str, Request], bytes]
 
 
 def _rewrite_message_urls(output: bytes, method: str, path: str, content_type: str, request: Request) -> bytes:
     if output and method == "GET" and is_message_endpoint(path):
-        current = _PUBLIC_URL or build_gateway_url(request)
+        current = build_gateway_url(request)
         return rewrite_file_urls(output, current)
     return output
 
@@ -211,9 +244,6 @@ _transforms: list[_TransformFn] = [
     _inject_i18n_transform,
     _inject_gateway_info_transform,
 ]
-
-
-# ── Proxy pipeline ─────────────────────────────────────
 
 
 _BLOCKED_RESPONSE_HEADERS = frozenset({
@@ -238,8 +268,13 @@ async def proxy_to_backend(
             if kl not in ("host", "origin", "transfer-encoding", "content-encoding"):
                 headers[k] = v
 
+    body_from_request = body is None
     if body is None and method in ("POST", "PUT", "PATCH"):
         body = await request.body()
+
+    if body is not None and body_from_request and method in ("POST", "PUT", "PATCH"):
+        ct = (headers or {}).get("content-type", "")
+        body = _strip_gateway_extras(body, ct)
 
     try:
         resp = await http_client.request(

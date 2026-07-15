@@ -3,13 +3,13 @@ import json
 import logging
 from pathlib import Path
 
-from config import load_env_config
+from config import load_env_config, GatewayConfig
 from pending_store import PendingStore
 
 _cfg = load_env_config()
 _BACKEND = _cfg.gotify_backend
-_UPLOAD_DIR = Path(_cfg.upload_dir)
-_PENDING_DIR = Path(_cfg.pending_dir)
+_UPLOAD_DIR = Path(GatewayConfig.UPLOAD_DIR)
+_PENDING_DIR = Path(GatewayConfig.PENDING_DIR)
 _DELETE_CONCURRENCY = _cfg.delete_concurrency
 _PENDING_TIMEOUT_SECONDS = _cfg.pending_timeout_minutes * 60
 from proxy import HttpClient, format_error, proxy_to_backend
@@ -17,10 +17,10 @@ from proxy import HttpClient, format_error, proxy_to_backend
 log = logging.getLogger("gotify-gateway.delete")
 
 _store = PendingStore(_UPLOAD_DIR, _PENDING_DIR, _PENDING_TIMEOUT_SECONDS)
+_DELETE_CONCURRENCY_SEM = asyncio.Semaphore(_DELETE_CONCURRENCY)
 
 
 def _collect_auth(request):
-    """Extract token/X-Gotify-Key/Authorization from request for backend calls."""
     token = request.query_params.get("token")
     x_key = request.headers.get("X-Gotify-Key")
     auth = request.headers.get("Authorization")
@@ -37,11 +37,13 @@ async def handle_message_delete(request, http_client, file_store=None, msg_id=No
     if not ids:
         return await proxy_to_backend(request, method="DELETE", http_client=http_client)
     token, auth_headers = _collect_auth(request)
-    files_by_id = {}
-    for mid in ids:
-        files = await _fetch_gateway_files(mid, token, auth_headers, http_client)
-        if files:
-            files_by_id[mid] = files
+
+    async def fetch(mid: int):
+        async with _DELETE_CONCURRENCY_SEM:
+            return mid, await _fetch_gateway_files(mid, token, auth_headers, http_client)
+
+    results = await asyncio.gather(*[fetch(mid) for mid in ids])
+    files_by_id = {mid: files for mid, files in results if files}
     return await _store.safe_delete(
         ids, files_by_id,
         proxy_to_backend(request, method="DELETE", http_client=http_client),
@@ -53,10 +55,8 @@ async def handle_app_delete(request, app_id, http_client, file_store=None):
     messages = await _enumerate_app_messages(app_id, token, auth_headers, http_client)
     if not messages:
         return await proxy_to_backend(request, method="DELETE", http_client=http_client)
-    sem = asyncio.Semaphore(_DELETE_CONCURRENCY)
-
     async def process_msg(msg):
-        async with sem:
+        async with _DELETE_CONCURRENCY_SEM:
             mid = msg.get("id")
             if not mid:
                 return mid, []
@@ -88,8 +88,6 @@ def _collect_ids(request, msg_id):
 async def _fetch_gateway_files(msg_id, token, auth_headers, http_client):
     query = f"&token={token}" if token else ""
     try:
-        # since=X → id < X, sorted descending → newest first.
-        # since=msg_id+1&limit=1 pinpoints exactly the target message.
         resp = await http_client.request(
             "GET", f"{_BACKEND}/message?limit=1&since={msg_id + 1}{query}",
             headers=auth_headers,
@@ -119,7 +117,6 @@ async def _enumerate_app_messages(app_id, token, auth_headers, http_client):
         if resp.status_code != 200:
             return []
         body = json.loads(resp.content)
-        # Gotify returns {"messages": [...], "paging": {...}}, unwrap.
         if isinstance(body, dict):
             return body.get("messages") or []
         if isinstance(body, list):
@@ -163,5 +160,5 @@ async def recover_on_startup(http_client):
         if msg is None:
             _store.update_status([mid], "deleted")
         else:
-            _store.restore([e])
+            await _store.restore([e])
             _store.remove_entries([mid])

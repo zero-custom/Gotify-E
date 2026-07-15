@@ -7,13 +7,9 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 os.environ.setdefault("GOTIFY_BACKEND", "http://gotify-test:8080")
-os.environ.setdefault("PUBLIC_URL", "http://gw-test:8765")
+os.environ.setdefault("PUBLIC_HOST", "gw-test:8765")
 os.environ.setdefault("HOST", "0.0.0.0")
 os.environ.setdefault("PORT", "8765")
-os.environ.setdefault("UPLOAD_DIR", "/tmp/gw-uploads")
-os.environ.setdefault("PENDING_DIR", "/tmp/gw-pending")
-os.environ.setdefault("STORED_MARKER", "{gateway}")
-os.environ.setdefault("MAX_UPLOAD_MB", "50")
 
 APP_DIR = Path(__file__).parent.parent / "app"
 sys.path.insert(0, str(APP_DIR))

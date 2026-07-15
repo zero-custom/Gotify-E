@@ -20,7 +20,6 @@ Business logic extracted from `handle_message_post`. Raises `ContentEncodingErro
 
 ```
 request
-request
   │
   ├─ Content-Type: multipart/form-data?
   │     └── No → proxy_to_backend(request, passthrough)
@@ -32,6 +31,9 @@ request
   │
   ├─ Extract fields: message, title, priority
   │
+  ├─ File count check: form.getlist("file") length > MAX_FILES_PER_REQUEST?
+  │     └── Yes → return 413 with sanitized error
+  │
   ├─ Get file fields via form.getlist("file")
   │     └── _process_files(file_fields, file_store)
   │           ├── For each UploadFile → FileStore.save()
@@ -41,7 +43,13 @@ request
   │     ├── If files saved → extras.gateway::files[] with uuid, path, name, size
   │     └── If message non-empty → append injected Markdown links after "---"
   │
-  └─ proxy_to_backend(POST, JSON body)
+  ├─ Proxy to backend (POST, JSON body)
+  │
+  ├─ On 2xx response from backend:
+  │     └── FileStore.confirm() → move files from staging to upload_dir
+  │
+  └─ On non-2xx response or error:
+        └── FileStore.cancel() → delete staging files
 ```
 
 ## Response Modification
@@ -60,11 +68,11 @@ request
 Iterates over form fields and processes each as either:
 
 | Type | Treatment |
-|---|---|
-| `UploadFile` (has `.filename`, `.read()`) | Save via `FileStore.save(filename, content)`. `FileRejectedError` logged and skipped (best-effort). |
+|---|---|---|
+| `UploadFile` (has `.filename`, `.read()`) | Save via `FileStore.save(filename, content)`. MIME mismatches are saved as `.bin` (best-effort, files never lost). |
 | `str` / `bytes` (raw form fields, uncommon) | Save as `"uploaded_file"` with `FileStore.save()`. Primarily for backward compatibility. |
 
-**Error strategy**: Best-effort. A single rejected file does not abort the entire upload. Unexpected errors are logged and also skipped.
+**Error strategy**: Best-effort. A single problematic file does not abort the entire upload. Unexpected errors are logged and the file is skipped.
 
 ## Payload Shape
 
@@ -82,8 +90,21 @@ Iterates over form fields and processes each as either:
 }
 ```
 
+## Error Handling
+
+| Condition | HTTP Status | Description |
+|---|---|---|---|
+| `ContentEncodingError` | 415 | Compressed upload not supported |
+| Too many files | 413 | `{"error": "Too many files (max: 5)", "code": 413}` |
+| MIME mismatch | Saved as `.bin` | File renamed to `.bin`, never lost |
+| MIME detection failure | Saved as `.bin` | Graceful degradation |
+| Any other | 500 | Generic error boundary |
+
+**Error sanitization**: Filenames in error messages have `[` and `]` stripped to prevent log injection in JSON error bodies.
+
 ## Configuration
 
 | Constant | Source | Description |
 |---|---|---|
 | `_MAX_UPLOAD` | `cfg.max_upload_mb * 1024 * 1024` | Maximum form part size (bytes) for `request.form()`. |
+| `_MAX_FILES` | `cfg.max_files_per_request` | Maximum number of files allowed per request. |

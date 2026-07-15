@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.1.0 (2026-07-13)
+
+### Changed
+
+#### 安全优化
+- SVG 响应头升级为 `sandbox` 指令，阻止脚本执行。
+- 新增 `DANGEROUS_EXTS`，危险扩展名强制 `Content-Disposition: attachment`，防 XSS。
+- 文件上传增加文件名截断、NFKC 归一化、路径穿越消毒。
+- DELETE 请求添加并发控制，避免资源竞争。
+- `pending_store.py` 新增路径格式正则校验，拒绝非标准 UUID 嵌套目录路径。
+- `proxy.py` 新增代理层 extras 过滤，剥离所有 `gateway::*` 键，防止客户端注入伪造文件字段。
+
+#### 隐私保护
+- `repr` 脱敏策略从关键词匹配改为白名单字段，精确控制日志遮蔽范围。
+
+#### 程序可读性
+- 配置重构：`GatewayConfig` 与 `EnvConfig` 职责分离，架构常量与部署参数不再混用。
+
 ## 1.0.0 (2026-07-09)
 
 ### Changed

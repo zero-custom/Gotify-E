@@ -5,16 +5,17 @@
 ## 数据流
 
 ```
-DELETE /message/{id}
+DELETE /message{/id}
   │
   ├─ 从路径或 ?ids= 查询参数解析 ID 列表
-  ├─ GET /message/{id}（复用认证信息）→ 读取 extras.gateway::files
-  ├─ os.rename() 文件 → pending_dir/YYYYMMDD/
-  ├─ 追加 manifest.jsonl 条目（status: "moved"）
+  ├─ 并发获取每个 ID 的 extras.gateway::files
+  │   （吞吐量由共享的 _DELETE_CONCURRENCY_SEM 控制）
+  ├─ 收集 files_by_id 映射
+  ├─ 将文件移入 pending → 追加 manifest 条目
   ├─ 代理 DELETE 到后端
   │
   ├─ 200/204 → 保留在 pending（cleanup_loop 负责过期清理）
-  └─ 其他 → 将文件恢复至 upload_dir，删除 manifest 条目
+  └─ 其他 → 恢复文件至 upload_dir，删除 manifest 条目
 ```
 
 ## 函数
@@ -25,14 +26,14 @@ DELETE /message/{id}
 - 路径参数 `msg_id`（如 `/message/123`）
 - 查询参数 `?ids=[1,2,3]`
 
-初步 GET 和后续 DELETE 使用相同的认证（`token` 查询参数或 `X-Gotify-Key` 请求头）。DELETE 代理前文件已移入 pending。DELETE 非 2xx 时，所有已移动的文件恢复，manifest 条目移除。
+并发获取每个 ID 的文件描述符（吞吐量由共享的 `DELETE_CONCURRENCY` 信号量控制，与 `handle_app_delete` 共用同一对象池），然后委托给 `PendingStore.safe_delete()`。
 
 ### `handle_app_delete(request, app_id, http_client, file_store=None)`
 
 整个应用的批量删除（`DELETE /application/{id}/message`）。
 
 1. 通过 `GET /application/{id}/message` 枚举所有消息
-2. 并发获取每条消息的 `extras.gateway::files`（并发度由 `DELETE_CONCURRENCY` 控制）
+2. 并发获取每条消息的 `extras.gateway::files`（吞吐量由共享的 `DELETE_CONCURRENCY` 信号量控制，与 `handle_message_delete` 共用同一对象池）
 3. 一次性将所有文件移入 pending
 4. 代理 DELETE 请求
 5. 失败时恢复所有文件并移除 manifest 条目
@@ -43,11 +44,11 @@ DELETE /message/{id}
 
 ### `_fetch_gateway_files(msg_id, token, auth_header, http_client) -> list[dict]`
 
-GET `/message/{msg_id}` 并提取 `extras.gateway::files`。返回文件描述符的原始列表。任何错误（404、超时、非 JSON 响应）均返回 `[]`。
+GET `/message?limit=1&since={msg_id + 1}` — Gotify 按降序返回消息（最新在前），`since=msg_id+1&limit=1` 精确定位目标消息。验证 `msg.id == msg_id` 后提取 `extras.gateway::files`。任何错误（404、超时、非 JSON 响应、ID 不匹配）均返回 `[]`。
 
 ### `_enumerate_app_messages(app_id, token, auth_header, http_client) -> list[dict]`
 
-GET `/application/{id}/message` 并返回响应体（消息列表）。任何错误均返回 `[]`。
+GET `/application/{id}/message`。解包 Gotify 的嵌套响应格式（`{"messages": [...], "paging": {...}}`），提取 `messages` 键。任何错误均返回 `[]`。
 
 ### `recover_on_startup(http_client)`
 
@@ -71,5 +72,5 @@ GET `/application/{id}/message` 并返回响应体（消息列表）。任何错
 
 | 常量 | 来源 | 说明 |
 |---|---|---|
-| `_DELETE_CONCURRENCY` | `cfg.delete_concurrency` | 应用级批量删除时的最大并发 GET 数 |
+| `_DELETE_CONCURRENCY` | `cfg.delete_concurrency` | 获取文件描述符时的最大并发 GET 数。模块级共享信号量（`_DELETE_CONCURRENCY_SEM`），`handle_message_delete` 和 `handle_app_delete` 共用。 |
 | `_PENDING_TIMEOUT_SECONDS` | `cfg.pending_timeout_minutes * 60` | 文件在 pending 中保留的时间，超时后由 `cleanup_loop` 清理 |

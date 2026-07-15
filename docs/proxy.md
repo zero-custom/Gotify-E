@@ -45,9 +45,12 @@ Constructs a full backend URL: `{BACKEND}{path}?{query}`. Query string is omitte
 
 Returns the public gateway URL for file link rewriting. Resolution order:
 
-1. `_PUBLIC_URL` (from `PUBLIC_URL` env var) if set
-2. `X-Forwarded-Proto` header + `Host` header (handles reverse proxy)
-3. WebSocket URL scheme normalisation (ws→http, wss→https)
+1. `PUBLIC_HOST` configured → resolve candidate URL from request headers, check against whitelist:
+   - **Match**: return candidate URL (used for marker rewriting)
+   - **No match**: return `""` (skip rewriting — don't expose internal URLs)
+2. `PUBLIC_HOST` not configured → **trust mode**: auto-detect from request headers, log a warning about Host header injection risk
+3. `X-Forwarded-Proto` header + `Host` header (handles reverse proxy)
+4. WebSocket URL scheme normalisation (ws→http, wss→https)
 
 ### `is_message_endpoint(path) -> bool`
 
@@ -75,11 +78,15 @@ Inserts `<script src="/_gateway/i18n.js"></script>` before `</body>` in HTML res
 
 ### `inject_gateway_info(output) -> bytes`
 
-Injects `_gateway` and `_upload_max` fields into JSON responses from `/version`. Handles non-dict or non-JSON bodies gracefully by returning the original output unchanged.
+Injects `_gateway`, `_upload_max`, and `_max_files` fields into JSON responses from `/version`. Handles non-dict or non-JSON bodies gracefully by returning the original output unchanged.
 
 ### `format_error(status_code, message, backend_url="") -> dict`
 
 Returns a standard error dict: `{"error": message, "code": status_code}`. Adds `"backend"` key when `backend_url` is non-empty.
+
+### Token Sanitization
+
+A `TokenSanitizingFilter` (from `log_filter.py`, referencing the Gotify 2.9.1 `tokenRegexp` pattern) is attached to the root logger at module level. It masks bearer tokens and query-parameter tokens in log messages using the pattern `token=[^&\s]+` → `token=[masked]`. This prevents credential leakage in application logs.
 
 ## Response Transform Pipeline
 
@@ -115,6 +122,20 @@ def my_transform(output, method, path, content_type, request) -> bytes:
 _transforms.append(my_transform)
 ```
 
+## Request Body Security
+
+### `_strip_gateway_extras(body, content_type) -> bytes`
+
+Strips all `gateway::*` keys from `extras` in proxied JSON request bodies. Applied only when the body originates from the incoming request (not when explicitly passed by `upload.py`'s multipart handler, which is the legitimate source of `gateway::files`).
+
+| Condition | Behaviour |
+|---|---|
+| Body is empty or non-JSON | Returned unchanged |
+| `extras` key starts with `gateway::` | Key removed, body re-encoded |
+| No `gateway::*` keys found | Returned unchanged (no re-encode overhead) |
+
+This prevents clients from injecting `gateway::files` through non-multipart `POST /message`, `PUT /message`, or any proxied endpoint. Combined with the path format validation in `pending_store.py`, only the multipart upload handler can author `gateway::files` entries.
+
 ## Core Proxy Function
 
 ### `proxy_to_backend(request, http_client, method=None, headers=None, body=None) -> Response`
@@ -125,8 +146,9 @@ Central request proxy pipeline:
 request
   │
   ├─ Determine method, build backend URL
-  ├─ Filter request headers (strip: host, origin, transfer-encoding, content-encoding)
+  ├─ Filter request headers (strip: host, transfer-encoding, content-encoding)
   ├─ Read request body (POST/PUT/PATCH only)
+  ├─ Strip gateway::* extras keys from JSON bodies (security — see below)
   ├─ http_client.request(method, backend_url, headers, body)
   │
   ├─ On success:
@@ -140,8 +162,10 @@ request
 
 | Header filter | Direction | Stripped |
 |---|---|---|
-| Request headers | Outgoing to backend | `host`, `origin`, `transfer-encoding`, `content-encoding` |
+| Request headers | Outgoing to backend | `host`, `transfer-encoding`, `content-encoding` |
 | Response headers | Incoming to client | `transfer-encoding`, `content-encoding`, `alt-svc`, `content-length` |
+
+> Note: `origin` was explicitly removed from the request header blacklist. The gateway is a transparent proxy and must preserve the Origin header so the backend can perform its own CORS validation.
 
 ## Public Interface
 

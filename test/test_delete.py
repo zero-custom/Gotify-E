@@ -1,7 +1,6 @@
 import json
 import time
 from datetime import datetime, timezone
-from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -9,6 +8,7 @@ import pytest
 from delete_handler import (
     _collect_ids, _fetch_gateway_files, _enumerate_app_messages,
     recover_on_startup, handle_message_delete, handle_app_delete,
+    _DELETE_CONCURRENCY_SEM,
 )
 from pending_store import PendingStore
 from proxy import HttpResponse
@@ -16,7 +16,7 @@ from proxy import HttpResponse
 
 def _gw_files(*suffixes):
     return [
-        {"uuid": f"u{i}", "path": f"ab/cd/u{i}_{s}", "name": s, "size": 100}
+        {"uuid": f"{i:032x}", "path": f"ab/cd/{i:032x}_{s}", "name": s, "size": 100}
         for i, s in enumerate(suffixes)
     ]
 
@@ -77,7 +77,7 @@ class TestFetchGatewayFiles:
         fake_http.responses = [_make_gotify_msg(1, files)]
         result = await _fetch_gateway_files(1, None, None, fake_http)
         assert len(result) == 1
-        assert result[0]["path"] == "ab/cd/u0_photo.png"
+        assert result[0]["path"] == "ab/cd/00000000000000000000000000000000_photo.png"
 
     async def test_returns_empty_when_no_extras(self, fake_http):
         fake_http.responses = [_make_response(content=json.dumps({
@@ -123,46 +123,87 @@ class TestEnumerateAppMessages:
         assert result == []
 
 
+@pytest.mark.asyncio
 class TestMoveToPending:
-    def test_moves_file_and_returns_entry(self, tmp_path):
+    async def test_moves_file_and_returns_entry(self, tmp_path):
         uploads = tmp_path / "uploads"
         pending = tmp_path / "_pending"
         file_dir = uploads / "ab" / "cd"
         file_dir.mkdir(parents=True)
-        src = file_dir / "u0_photo.png"
+        src = file_dir / "00000000000000000000000000000000_photo.png"
         src.write_text("data")
-        files = [{"path": "ab/cd/u0_photo.png", "uuid": "u0", "name": "photo.png", "size": 4}]
+        files = [{"path": "ab/cd/00000000000000000000000000000000_photo.png", "uuid": "00000000000000000000000000000000", "name": "photo.png", "size": 4}]
         store = _store_for(uploads, pending)
-        moved = store.move_to_pending(1, files)
+        moved = await store.move_to_pending(1, files)
         assert len(moved) == 1
         assert not src.exists()
         assert (pending / moved[0]["pending_path"]).exists()
         assert (pending / moved[0]["pending_path"]).read_text() == "data"
-        assert moved[0]["orig_path"] == "ab/cd/u0_photo.png"
+        assert moved[0]["orig_path"] == "ab/cd/00000000000000000000000000000000_photo.png"
         assert moved[0]["msg_id"] == 1
 
-    def test_skips_nonexistent_file(self, tmp_path):
+    async def test_skips_nonexistent_file(self, tmp_path):
         uploads = tmp_path / "uploads"
         pending = tmp_path / "_pending"
-        files = [{"path": "ab/cd/missing.png", "uuid": "u0", "name": "missing.png", "size": 4}]
+        (uploads / "ab" / "cd").mkdir(parents=True)
+        files = [{"path": "ab/cd/00000000000000000000000000000000_missing.png", "uuid": "00000000000000000000000000000000", "name": "missing.png", "size": 4}]
         store = _store_for(uploads, pending)
-        moved = store.move_to_pending(1, files)
+        moved = await store.move_to_pending(1, files)
         assert moved == []
 
 
+@pytest.mark.asyncio
+class TestPathFormatValidation:
+    async def test_rejects_short_uuid(self, tmp_path):
+        uploads = tmp_path / "uploads"
+        pending = tmp_path / "_pending"
+        files = [{"path": "ab/cd/short_photo.png", "uuid": "short", "name": "photo.png", "size": 4}]
+        store = _store_for(uploads, pending)
+        moved = await store.move_to_pending(1, files)
+        assert moved == []
+
+    async def test_rejects_traversal_path(self, tmp_path):
+        uploads = tmp_path / "uploads"
+        pending = tmp_path / "_pending"
+        files = [{"path": "../../../etc/passwd", "uuid": "evil", "name": "passwd", "size": 99}]
+        store = _store_for(uploads, pending)
+        moved = await store.move_to_pending(1, files)
+        assert moved == []
+
+    async def test_rejects_non_hex_prefix(self, tmp_path):
+        uploads = tmp_path / "uploads"
+        pending = tmp_path / "_pending"
+        files = [{"path": "zz/qq/00000000000000000000000000000000_photo.png", "uuid": "00000000000000000000000000000000", "name": "photo.png", "size": 4}]
+        store = _store_for(uploads, pending)
+        moved = await store.move_to_pending(1, files)
+        assert moved == []
+
+    async def test_accepts_valid_format(self, tmp_path):
+        uploads = tmp_path / "uploads"
+        pending = tmp_path / "_pending"
+        (uploads / "ab" / "cd").mkdir(parents=True)
+        src = uploads / "ab" / "cd" / "00000000000000000000000000000000_photo.png"
+        src.write_text("data")
+        files = [{"path": "ab/cd/00000000000000000000000000000000_photo.png", "uuid": "00000000000000000000000000000000", "name": "photo.png", "size": 4}]
+        store = _store_for(uploads, pending)
+        moved = await store.move_to_pending(1, files)
+        assert len(moved) == 1
+
+
+@pytest.mark.asyncio
 class TestRestoreFiles:
-    def test_moves_file_back(self, tmp_path):
+    async def test_moves_file_back(self, tmp_path):
         uploads = tmp_path / "uploads"
         pending = tmp_path / "_pending"
         (uploads / "ab" / "cd").mkdir(parents=True)
         pending_sub = pending / "20260709"
         pending_sub.mkdir(parents=True)
-        (pending_sub / "ab_cd_u0_photo.png").write_text("data")
-        moved = [{"msg_id": 1, "orig_path": "ab/cd/u0_photo.png", "pending_path": "20260709/ab_cd_u0_photo.png"}]
+        (pending_sub / "ab_cd_00000000000000000000000000000000_photo.png").write_text("data")
+        moved = [{"msg_id": 1, "orig_path": "ab/cd/00000000000000000000000000000000_photo.png", "pending_path": "20260709/ab_cd_00000000000000000000000000000000_photo.png"}]
         store = _store_for(uploads, pending)
-        store.restore(moved)
-        assert (uploads / "ab/cd/u0_photo.png").exists()
-        assert not (pending_sub / "ab_cd_u0_photo.png").exists()
+        await store.restore(moved)
+        assert (uploads / "ab/cd/00000000000000000000000000000000_photo.png").exists()
+        assert not (pending_sub / "ab_cd_00000000000000000000000000000000_photo.png").exists()
 
 
 class TestManifest:
@@ -245,7 +286,7 @@ class TestHandleMessageDelete:
         pending = tmp_path / "_pending"
         store = _store_for(uploads, pending)
         (uploads / "ab/cd").mkdir(parents=True)
-        (uploads / "ab/cd/u0_photo.png").write_text("data")
+        (uploads / "ab/cd/00000000000000000000000000000000_photo.png").write_text("data")
         import delete_handler
         old_store = delete_handler._store
         delete_handler._store = store
@@ -301,14 +342,14 @@ class TestHandleMessageDelete:
         pending = tmp_path / "_pending"
         store = _store_for(uploads, pending)
         (uploads / "ab/cd").mkdir(parents=True)
-        (uploads / "ab/cd/u0_doc.pdf").write_text("data")
+        (uploads / "ab/cd/00000000000000000000000000000000_doc.pdf").write_text("data")
         import delete_handler
         old = delete_handler._store
         delete_handler._store = store
         try:
             resp = await handle_message_delete(req, fake_http, msg_id=1)
             assert resp.status_code == 500
-            assert (uploads / "ab/cd/u0_doc.pdf").exists()
+            assert (uploads / "ab/cd/00000000000000000000000000000000_doc.pdf").exists()
             entries = store.read_manifest()
             assert len(entries) == 0
         finally:
@@ -337,6 +378,34 @@ class TestHandleMessageDelete:
             ]
             resp = await handle_message_delete(req, fake_http, msg_id=i)
             assert resp.status_code == 200
+
+    async def test_multi_ids_concurrent_fetch(self, fake_http, any_response):
+        fake_http.responses = [
+            _make_gotify_msg(1, _gw_files("a.png")),
+            _make_gotify_msg(2, _gw_files("b.png")),
+            _make_gotify_msg(3, _gw_files("c.png")),
+            _make_gotify_msg(4, _gw_files("d.png")),
+            _make_gotify_msg(5, _gw_files("e.png")),
+            any_response(status_code=200, content=b'ok'),
+        ]
+        req = MagicMock()
+        req.query_params = {"ids": "[1,2,3,4,5]"}
+        req.headers = {}
+        resp = await handle_message_delete(req, fake_http)
+        assert resp.status_code == 200
+        fetch_count = sum(1 for m, u, _, _ in fake_http.requests if "message?limit=1&since=" in u)
+        assert fetch_count == 5
+
+
+@pytest.mark.asyncio
+class TestConcurrencySemaphore:
+    async def test_module_level_semaphore_is_asyncio_semaphore(self):
+        import asyncio
+        assert isinstance(_DELETE_CONCURRENCY_SEM, asyncio.Semaphore)
+
+    async def test_module_level_semaphore_visible_via_import(self):
+        import delete_handler as dh
+        assert dh._DELETE_CONCURRENCY_SEM is _DELETE_CONCURRENCY_SEM
 
 
 @pytest.mark.asyncio
@@ -380,14 +449,14 @@ class TestHandleAppDelete:
         pending = tmp_path / "_pending"
         store = _store_for(uploads, pending)
         (uploads / "ab/cd").mkdir(parents=True)
-        (uploads / "ab/cd/u0_f.png").write_text("data")
+        (uploads / "ab/cd/00000000000000000000000000000000_f.png").write_text("data")
         import delete_handler
         old = delete_handler._store
         delete_handler._store = store
         try:
             resp = await handle_app_delete(req, 1, fake_http)
             assert resp.status_code == 500
-            assert (uploads / "ab/cd/u0_f.png").exists()
+            assert (uploads / "ab/cd/00000000000000000000000000000000_f.png").exists()
         finally:
             delete_handler._store = old
 

@@ -62,7 +62,7 @@ class TestServeUpload:
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as ac:
             resp = await ac.get("/uploads/ab/cd/icon.svg")
-        assert resp.headers.get("content-security-policy") == "script-src 'none'"
+        assert resp.headers.get("content-security-policy") == "sandbox"
 
 
 @pytest.mark.asyncio

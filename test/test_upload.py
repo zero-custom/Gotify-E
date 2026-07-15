@@ -1,10 +1,10 @@
 import json
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from upload import FileProcessingResult, _process_files, handle_message_post
-from storage import FileRejectedError, StoredFile
+from storage import StoredFile
 
 
 @pytest.mark.asyncio
@@ -21,7 +21,7 @@ class TestProcessFiles:
         store.save.return_value = StoredFile(
             marker_url="{gateway}/uploads/ab/cd/photo.png",
             markdown="![photo](http://gw/uploads/ab/cd/photo.png)",
-            uuid="u0", path="ab/cd/u0_photo.png", size=4,
+            uuid="abcdef1234567890abcdef1234567890", path="ab/cd/abcdef1234567890abcdef1234567890_photo.png", size=4,
             original_name="photo.png",
         )
         files = [self._upload_file("photo.png", b"data")]
@@ -30,15 +30,9 @@ class TestProcessFiles:
         assert len(result.injected_lines) == 1
         assert result.injected_lines[0] == "![photo](http://gw/uploads/ab/cd/photo.png)"
         assert len(result.stored_files) == 1
-        assert result.stored_files[0].uuid == "u0"
+        assert result.stored_files[0].uuid == "abcdef1234567890abcdef1234567890"
 
     async def test_rejected_file_is_skipped_not_raised(self):
-        store = MagicMock()
-        store.save.side_effect = FileRejectedError("claimed image but mime is application/zip")
-        files = [self._upload_file("photo.png", b"fake-zip")]
-        result = await _process_files(files, store)
-        assert len(result.injected_lines) == 0
-        assert len(result.stored_files) == 0
         store = MagicMock()
         store.save.side_effect = RuntimeError("disk full")
         files = [self._upload_file("photo.png", b"data")]
@@ -51,7 +45,7 @@ class TestProcessFiles:
 
         def _save(filename, body, **_kw):
             if b"bad" in body:
-                raise FileRejectedError("bad file")
+                raise RuntimeError("bad file")
             return StoredFile(
                 marker_url=f"{{gateway}}/uploads/xy/zz/{filename}",
                 markdown=f"![{filename}](http://gw/{filename})",
@@ -84,6 +78,22 @@ class TestProcessFiles:
         )
         result = await _process_files(["raw text content"], store)
         assert len(result.injected_lines) == 1
+
+    async def test_mime_mismatch_mock_returns_file(self):
+        """MIME mismatch in storage.py now returns saved file with .bin ext.
+        This test validates that _process_files handles a stored .bin result."""
+        store = MagicMock()
+        store.save.return_value = StoredFile(
+            marker_url="{gateway}/uploads/ab/cd/abcdef1234567890abcdef1234567890_photo.bin",
+            markdown="[evil.png]({gateway}/uploads/ab/cd/abcdef1234567890abcdef1234567890_photo.bin)",
+            uuid="abcdef1234567890abcdef1234567890", path="ab/cd/abcdef1234567890abcdef1234567890_photo.bin", size=12,
+            original_name="evil.png",
+        )
+        files = [self._upload_file("evil.png", b"not-really-png")]
+        result = await _process_files(files, store)
+        assert len(result.injected_lines) == 1
+        assert ".bin" in result.injected_lines[0]
+        assert "evil.png" in result.injected_lines[0]
 
     async def test_raw_bytes_saved(self):
         store = MagicMock()
@@ -121,10 +131,11 @@ class TestHandleMessagePost:
     async def test_content_encoding_identity_allowed(self, fake_http, any_response):
         fake_http.responses = [any_response(content=b'{"id":2}')]
         store = MagicMock()
+        store.confirm = AsyncMock()
         store.save.return_value = StoredFile(
             marker_url="{gateway}/uploads/ab/cd/photo.png",
             markdown="![photo](http://gw/photo.png)",
-            uuid="u0", path="ab/cd/u0_photo.png", size=4,
+            uuid="abcdef1234567890abcdef1234567890", path="ab/cd/abcdef1234567890abcdef1234567890_photo.png", size=4,
             original_name="photo.png",
         )
         form_obj = MagicMock()
@@ -147,10 +158,11 @@ class TestHandleMessagePost:
     async def test_multipart_with_files(self, fake_http, any_response):
         fake_http.responses = [any_response(content=b'{"id":1}')]
         store = MagicMock()
+        store.confirm = AsyncMock()
         store.save.return_value = StoredFile(
             marker_url="{gateway}/uploads/ab/cd/photo.png",
             markdown="![photo](http://gw/photo.png)",
-            uuid="u0", path="ab/cd/u0_photo.png", size=4,
+            uuid="abcdef1234567890abcdef1234567890", path="ab/cd/abcdef1234567890abcdef1234567890_photo.png", size=4,
             original_name="photo.png",
         )
 
@@ -174,7 +186,7 @@ class TestHandleMessagePost:
         payload = json.loads(body)
         assert "gateway::files" in payload["extras"]
         assert payload["extras"]["gateway::files"] == [
-            {"uuid": "u0", "path": "ab/cd/u0_photo.png", "name": "photo.png", "size": 4},
+            {"uuid": "abcdef1234567890abcdef1234567890", "path": "ab/cd/abcdef1234567890abcdef1234567890_photo.png", "name": "photo.png", "size": 4},
         ]
 
     async def test_multipart_without_files(self, fake_http, any_response):

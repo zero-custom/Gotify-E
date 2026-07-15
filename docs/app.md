@@ -6,8 +6,10 @@ FastAPI application. Defines HTTP routes, body size middleware, WebSocket relay,
 
 `FastAPI` instance created with `title="Gotify[E]"`, versioned (`VERSION` from `config.py`). A `lifespan` context manager manages:
 
-- **Startup**: Creates `cleanup_loop()` asyncio task; runs `recover_on_startup()` to resolve any pending files left from a crash.
+- **Startup**: Runs `recover_staging()` to clean up stale files from a previous crash; creates `cleanup_loop()` asyncio task; runs `recover_on_startup()` to resolve any pending files left from a crash.
 - **Shutdown**: Cancels cleanup task; closes `RealHttpClient` connection pool.
+
+A `TokenSanitizingFilter` (from `log_filter.py`) is installed on the root logger at module level to mask credentials in log output.
 
 A body-size check middleware runs on every `POST`/`PUT`/`PATCH`: if `Content-Length` exceeds `MAX_UPLOAD`, it returns a 413 JSON error via `format_error`.
 
@@ -35,9 +37,12 @@ Serves uploaded files from `UPLOAD_DIR`. Resolves the requested path and validat
 |---|---|---|
 | `Access-Control-Allow-Origin` | `*` | Always |
 | `Cache-Control` | `public, max-age=3600` | Always |
-| `Content-Security-Policy` | `script-src 'none'` | Only for `.svg` files |
+| `Content-Security-Policy` | `sandbox` | When extension is NOT in `DANGEROUS_EXTS` (safe files) |
+| `Content-Disposition` | `attachment; filename="..."` | Extension in `DANGEROUS_EXTS` (`.html`, `.htm`, `.js`, `.php`, etc.) |
 
 Returns `FileResponse` with the resolved file path. Raises `HTTPException(404)` when not found or path traversal is detected.
+
+**Dangerous extension behavior**: Files with extensions in `DANGEROUS_EXTS` are served with `Content-Disposition: attachment` to prevent the browser from rendering them inline (XSS prevention). All other files use the default inline disposition.
 
 ### `handle_message_default(request)`
 
@@ -74,10 +79,11 @@ _cfg = load_env_config()
 _BACKEND = _cfg.gotify_backend
 _HOST = _cfg.host
 _PORT = _cfg.port
-_PUBLIC_URL = _cfg.public_url
-_UPLOAD_DIR = Path(_cfg.upload_dir)
+_PUBLIC_HOST = _cfg.public_host
+_UPLOAD_DIR = Path(GatewayConfig.UPLOAD_DIR)
+_STAGING_DIR = Path(GatewayConfig.STAGING_DIR)
 _MAX_UPLOAD = _cfg.max_upload_mb * 1024 * 1024
-_MARKER_PREFIX = f"{_cfg.stored_marker.rstrip('/')}/uploads/"
+_MARKER_PREFIX = f"{GatewayConfig.STORED_MARKER.rstrip('/')}/uploads/"
 _IMAGE_EXTS = GatewayConfig.IMAGE_EXTS
 _GATEWAY_DIR = Path(__file__).parent.resolve() / GatewayConfig.GATEWAY_DIR_NAME
 ```
@@ -87,8 +93,9 @@ _GATEWAY_DIR = Path(__file__).parent.resolve() / GatewayConfig.GATEWAY_DIR_NAME
 ```python
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    cleanup_task = asyncio.create_task(cleanup.cleanup_loop())
-    await delete_handler.recover_on_startup(_http_client)
+    await recover_staging()                      # clean up stale staging files
+    cleanup_task = asyncio.create_task(cleanup_loop())
+    await recover_on_startup(_http_client)
     yield
     cleanup_task.cancel()
     await _http_client.aclose()
@@ -152,3 +159,4 @@ Logs startup configuration (version, backend, listen address, upload dir), then 
 | `delete_handler` | `handle_app_delete, handle_message_delete, recover_on_startup` | DELETE file cleanup and crash recovery |
 | `cleanup` | `cleanup_loop` | Periodic expiration sweep of pending files |
 | `websocket_relay` | `stream_proxy` | Bidirectional WebSocket relay with URL rewriting |
+| `log_filter` | `TokenSanitizingFilter` | Log-based credential masking (installed at module level) |

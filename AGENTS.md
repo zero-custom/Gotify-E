@@ -4,7 +4,7 @@
 
 FastAPI 反向代理网关，为 Gotify 增加文件存储能力。客户端只需将 Gotify 地址指向网关，无需任何配置变更。
 
-- **版本号**：`1.0.0`（定义在 `app/config.py:VERSION`）
+- **版本号**：`1.1.0`（定义在 `app/config.py:VERSION`）
 - **Python**：3.14+（Docker 使用 Alpine）
 - **端口**：8765
 - **入口点**：`app/app.py:main()` → `uvicorn app:app`

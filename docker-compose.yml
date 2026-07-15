@@ -16,10 +16,13 @@ services:
       - 8765:8765
     environment:
       - GOTIFY_BACKEND=http://gotify:80
-      - PUBLIC_URL=http://localhost:8765
+      - PUBLIC_HOST=localhost:8765
       - HOST=0.0.0.0
       - PORT=8765
-      - STORED_MARKER={gateway}
+      - MAX_UPLOAD_MB=50
+      - MAX_FILES_PER_REQUEST=5
+      - PENDING_TIMEOUT_MINUTES=120
+      - CLEANUP_INTERVAL_MINUTES=30
     volumes:
       - uploads-data:/data
     depends_on:

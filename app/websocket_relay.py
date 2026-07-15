@@ -9,7 +9,6 @@ from proxy import build_gateway_url, rewrite_file_urls
 
 _cfg = load_env_config()
 _BACKEND = _cfg.gotify_backend
-_PUBLIC_URL = _cfg.public_url
 
 log = logging.getLogger("gotify-gateway.websocket")
 
@@ -51,7 +50,7 @@ async def stream_proxy(websocket: WebSocket):
                         if message is None:
                             closed = True
                             break
-                        current = _PUBLIC_URL or build_gateway_url(websocket)
+                        current = build_gateway_url(websocket)
                         text = message if isinstance(message, str) else message.decode("utf-8")
                         text = rewrite_file_urls(text.encode("utf-8"), current).decode("utf-8")
                         await websocket.send_text(text)

@@ -7,10 +7,11 @@ Delegates the move–execute–rollback transaction to `PendingStore.safe_delete
 ## Flow
 
 ```
-DELETE /message/{id}
+DELETE /message{/id}
   │
   ├─ Parse IDs from path or ?ids= query
-  ├─ GET /message/{id} (reuse auth) → read extras.gateway::files
+  ├─ Concurrently fetch extras.gateway::files for each ID
+  │   (throughput capped by shared _DELETE_CONCURRENCY_SEM)
   ├─ Collect files_by_id mapping
   ├─ PendingStore.safe_delete(msg_ids, files_by_id, delete_coro)
   │     ├─ move_to_pending() + append_manifest() for each msg_id
@@ -28,14 +29,14 @@ Single / batch message delete. Accepts message IDs from:
 - Path parameter `msg_id` (e.g., `/message/123`)
 - Query parameter `?ids=[1,2,3]`
 
-Collects file descriptors for each ID, then delegates to `PendingStore.safe_delete()`.
+Concurrently fetches file descriptors for each ID (throughput capped by the shared `DELETE_CONCURRENCY` semaphore — same pool used by `handle_app_delete`), then delegates to `PendingStore.safe_delete()`.
 
 ### `handle_app_delete(request, app_id, http_client, file_store=None)`
 
 Bulk delete for an entire application (`DELETE /application/{id}/message`).
 
 1. Enumerates all messages via `GET /application/{id}/message`
-2. Concurrently fetches each message's `extras.gateway::files` (concurrency controlled by `DELETE_CONCURRENCY`)
+2. Concurrently fetches each message's `extras.gateway::files` (throughput capped by the shared `DELETE_CONCURRENCY` semaphore — same pool used by `handle_message_delete`)
 3. Delegates to `PendingStore.safe_delete()` with the aggregated `files_by_id`
 
 ### `_collect_ids(request, msg_id) -> list[int]`
@@ -44,11 +45,11 @@ Parses message IDs from request parameters. Priority: `msg_id` argument > `?ids=
 
 ### `_fetch_gateway_files(msg_id, token, auth_header, http_client) -> list[dict]`
 
-Performs a GET on `/message/{msg_id}` and extracts `extras.gateway::files`. Returns the raw list of file descriptors. Returns `[]` on any error (404, timeout, non-JSON response).
+Performs a GET on `/message?limit=1&since={msg_id + 1}` — since Gotify returns messages sorted descending (newest first), `since=msg_id+1&limit=1` pinpoints exactly the target message. Verifies `msg.id == msg_id` before extracting `extras.gateway::files`. Returns `[]` on any error (404, timeout, non-JSON response, ID mismatch).
 
 ### `_enumerate_app_messages(app_id, token, auth_header, http_client) -> list[dict]`
 
-Performs a GET on `/application/{id}/message` and returns the response body (list of messages). Returns `[]` on any error.
+Performs a GET on `/application/{id}/message`. Unwraps Gotify's nested response format (`{"messages": [...], "paging": {...}}`) by extracting the `messages` key. Returns `[]` on any error.
 
 ### `recover_on_startup(http_client)`
 
@@ -72,5 +73,5 @@ Called during app lifespan startup. Scans the manifest for entries with `status:
 
 | Constant | Source | Description |
 |---|---|---|
-| `_DELETE_CONCURRENCY` | `cfg.delete_concurrency` | Max concurrent GET requests during app-level bulk delete |
+| `_DELETE_CONCURRENCY` | `cfg.delete_concurrency` | Max concurrent GET requests during file descriptor fetching. Shared module-level semaphore (`_DELETE_CONCURRENCY_SEM`) used by both `handle_message_delete` and `handle_app_delete`. |
 | `_PENDING_TIMEOUT_SECONDS` | `cfg.pending_timeout_minutes * 60` | How long files stay in pending before `cleanup_loop` removes them |

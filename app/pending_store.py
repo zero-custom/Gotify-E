@@ -1,11 +1,16 @@
+import asyncio
 import json
 import logging
 import os
+import re
+import shutil
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 log = logging.getLogger("gotify-gateway.pending_store")
+
+_PATH_PATTERN = re.compile(r"^[0-9a-f]{2}/[0-9a-f]{2}/[0-9a-f]{32}_.+$")
 
 
 class PendingStore:
@@ -14,14 +19,21 @@ class PendingStore:
         self._pending_dir = pending_dir
         self._pending_timeout_seconds = pending_timeout_seconds
 
-    def move_to_pending(self, msg_id: int, files: list) -> list[dict]:
+    async def move_to_pending(self, msg_id: int, files: list) -> list[dict]:
         date_str = datetime.now(timezone.utc).strftime("%Y%m%d")
         moved = []
+        upload_root = str(self._upload_dir.resolve())
         for f in files:
             orig = f.get("path", "")
             if not orig:
                 continue
-            src = self._upload_dir / orig
+            if not _PATH_PATTERN.match(orig):
+                log.warning("invalid path format in move_to_pending: %s", orig)
+                continue
+            src = (self._upload_dir / orig).resolve()
+            if not str(src).startswith(upload_root):
+                log.warning("path traversal blocked in move_to_pending: %s", orig)
+                continue
             if not src.exists():
                 log.warning("file not found: %s", src)
                 continue
@@ -30,21 +42,25 @@ class PendingStore:
             flat = orig.replace("/", "_")
             dst = pending_sub / flat
             try:
-                os.rename(str(src), str(dst))
+                await asyncio.to_thread(shutil.move, str(src), str(dst))
                 moved.append({"msg_id": msg_id, "orig_path": orig, "pending_path": f"{date_str}/{flat}"})
             except OSError as e:
                 log.error("move failed: %s -> %s: %s", src, dst, e)
         return moved
 
-    def restore(self, entries: list[dict]) -> None:
+    async def restore(self, entries: list[dict]) -> None:
+        upload_root = str(self._upload_dir.resolve())
         for item in entries:
             src = self._pending_dir / item["pending_path"]
-            dst = self._upload_dir / item["orig_path"]
+            dst = (self._upload_dir / item["orig_path"]).resolve()
+            if not str(dst).startswith(upload_root):
+                log.warning("path traversal blocked in restore: %s", item.get("orig_path"))
+                continue
             if not src.exists():
                 continue
             dst.parent.mkdir(parents=True, exist_ok=True)
             try:
-                os.rename(str(src), str(dst))
+                await asyncio.to_thread(shutil.move, str(src), str(dst))
             except OSError as e:
                 log.error("restore failed: %s -> %s: %s", src, dst, e)
 
@@ -75,6 +91,15 @@ class PendingStore:
                         pass
         return entries
 
+    def _write_manifest(self, entries: list[dict]) -> None:
+        manifest_path = self._pending_dir / "manifest.jsonl"
+        self._pending_dir.mkdir(parents=True, exist_ok=True)
+        tmp = manifest_path.with_suffix(".jsonl.tmp")
+        with open(tmp, "w") as fp:
+            for e in entries:
+                fp.write(json.dumps(e) + "\n")
+        os.replace(str(tmp), str(manifest_path))
+
     def update_status(self, msg_ids: list, new_status: str) -> None:
         manifest_path = self._pending_dir / "manifest.jsonl"
         if not manifest_path.exists():
@@ -87,10 +112,7 @@ class PendingStore:
                 e["status"] = new_status
                 changed = True
         if changed:
-            self._pending_dir.mkdir(parents=True, exist_ok=True)
-            with open(manifest_path, "w") as fp:
-                for e in entries:
-                    fp.write(json.dumps(e) + "\n")
+            self._write_manifest(entries)
 
     def remove_entries(self, msg_ids: list) -> None:
         manifest_path = self._pending_dir / "manifest.jsonl"
@@ -98,9 +120,7 @@ class PendingStore:
             return
         idset = set(msg_ids)
         entries = [e for e in self.read_manifest() if e.get("msg_id") not in idset]
-        with open(manifest_path, "w") as fp:
-            for e in entries:
-                fp.write(json.dumps(e) + "\n")
+        self._write_manifest(entries)
 
     def clean_expired(self, now: float | None = None) -> None:
         entries = self.read_manifest()
@@ -116,24 +136,12 @@ class PendingStore:
                 p.unlink(missing_ok=True)
             else:
                 remaining.append(e)
-        manifest_path = self._pending_dir / "manifest.jsonl"
-        with open(manifest_path, "w") as fp:
-            for e in remaining:
-                fp.write(json.dumps(e) + "\n")
+        self._write_manifest(remaining)
 
     async def safe_delete(self, msg_ids: list, files_by_id: dict, delete_coro):
-        """Move files to pending, execute delete, rollback on failure.
-
-        Parameters:
-            msg_ids: all message IDs for manifest cleanup on rollback.
-            files_by_id: mapping of msg_id to list of file descriptors.
-            delete_coro: awaitable that performs the DELETE and returns a response.
-
-        Returns: the response from delete_coro.
-        """
         all_moved = []
         for mid, files in files_by_id.items():
-            moved = self.move_to_pending(mid, files)
+            moved = await self.move_to_pending(mid, files)
             if moved:
                 self.append_manifest(mid, moved)
                 all_moved.extend(moved)
@@ -141,7 +149,7 @@ class PendingStore:
         resp = await delete_coro
 
         if resp.status_code not in (200, 204) and all_moved:
-            self.restore(all_moved)
+            await self.restore(all_moved)
             self.remove_entries(msg_ids)
 
         return resp

@@ -2,6 +2,20 @@
 
 管理 DELETE 拦截期间移动到 pending 目录的文件。提供仅追加的 manifest 操作日志、文件移动/恢复和基于时间的过期清理。
 
+## 安全防护
+
+### 路径格式校验
+
+`move_to_pending` 对每个传入的 `path` 做正则校验 `^[0-9a-f]{2}/[0-9a-f]{2}/[0-9a-f]{32}_.+$`，仅允许 `storage.py` 生成的 UUID 嵌套目录结构。不匹配的路径被拒绝并记警告——防止通过 `gateway::files` 注入任意路径。
+
+### 路径穿越防护
+
+`move_to_pending` 和 `restore` 均使用 `Path.resolve()` 解析目标路径，并确认其在 `upload_dir` 范围内。`../../../etc/passwd` 等穿越载荷在文件操作前被拦截。
+
+### 代理层 extras 过滤
+
+`proxy.py` 在每次代理转发的 JSON 请求体中剥离所有 `gateway::*` 键。配合路径格式校验，确保只有 `upload.py` 中的 multipart 上传处理器可以合法创建 `gateway::files` 条目。
+
 ## 类：`PendingStore`
 
 在 `delete_handler.py` 中实例化为 `_store`：
@@ -31,11 +45,11 @@ _store = PendingStore(upload_dir, pending_dir, pending_timeout_seconds)
 
 #### `move_to_pending(msg_id, files) -> list[dict]`
 
-将文件从 `upload_dir` 移动到 `pending_dir/{date}/`。使用 `os.rename()`——纯元数据操作，无磁盘拷贝。
+将文件从 `upload_dir` 移动到 `pending_dir/{date}/`。使用 `shutil.move()` 实现跨文件系统安全。
 
 | 情况 | 行为 |
 |---|---|
-| 文件存在 | `os.rename` → 添加条目到返回值 |
+| 文件存在 | `shutil.move` → 添加条目到返回值 |
 | 文件不存在 | 记录警告，静默跳过 |
 | `path` 为空 | 静默跳过 |
 | `OSError` | 记录错误，条目不包含在该次结果中 |
@@ -56,11 +70,11 @@ _store = PendingStore(upload_dir, pending_dir, pending_timeout_seconds)
 
 #### `update_status(msg_ids, new_status)`
 
-更新所有匹配任一 `msg_id` 的条目的 `status` 字段。重写整个 manifest 文件。manifest 不存在时无操作。
+更新所有匹配任一 `msg_id` 的条目的 `status` 字段。原子性地重写整个 manifest 文件。manifest 不存在时无操作。
 
 #### `remove_entries(msg_ids)`
 
-删除 `msg_id` 在给定列表中的所有条目。重写整个 manifest 文件。
+删除 `msg_id` 在给定列表中的所有条目。原子性地重写整个 manifest 文件。
 
 #### `clean_expired(now=None)`
 
@@ -71,6 +85,8 @@ _store = PendingStore(upload_dir, pending_dir, pending_timeout_seconds)
 | `now` | `time.time()` | 注入参考时间戳，便于确定性测试 |
 
 每条过期条目：删除 pending 文件（`Path.unlink(missing_ok=True)`）并丢弃 manifest 记录。未过期的条目保留。
+
+**原子性 manifest 写入**：所有重写 manifest 的方法（`update_status`、`remove_entries`、`clean_expired`）使用 tmpfile + `os.replace()` 模式。新内容写入同一目录的 `.tmp` 文件，然后原子性地覆盖原文件。这可以防止崩溃后读取到部分损坏的 manifest。
 
 ## 目录结构
 

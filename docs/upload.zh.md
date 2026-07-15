@@ -19,7 +19,10 @@ request
   │
   ├─ 解析表单数据（max_part_size = MAX_UPLOAD）
   │
-  ├─ 提取字段：message, title, priority
+  ├─ 提取字段：message, title, priority, extras
+  │
+  ├─ 文件数量检查：form.getlist("file") 数量超出 MAX_FILES_PER_REQUEST？
+  │     └── 是 → 返回 413
   │
   ├─ 通过 form.getlist("file") 获取文件字段
   │     └── _process_files(file_fields, file_store)
@@ -30,7 +33,13 @@ request
   │     ├── 若有文件保存 → extras.gateway::files[] 含 uuid, path, name, size
   │     └── 若消息非空 → 在 "---" 后追加注入的 Markdown 链接
   │
-  └─ proxy_to_backend(POST, JSON body)
+  ├─ 代理至后端（POST, JSON body）
+  │
+  ├─ 后端返回 2xx：
+  │     └── FileStore.confirm() → 将文件从 staging 移至 upload_dir
+  │
+  └─ 后端返回非 2xx 或出错：
+        └── FileStore.cancel() → 删除 staging 文件
 ```
 
 ## 响应修改
@@ -50,10 +59,10 @@ request
 
 | 类型 | 处理方式 |
 |---|---|
-| `UploadFile`（有 `.filename`、`.read()`） | 通过 `FileStore.save(filename, content)` 保存。`FileRejectedError` 记录日志并跳过（尽力而为）。 |
+| `UploadFile`（有 `.filename`、`.read()`） | 通过 `FileStore.save(filename, content)` 保存。MIME 不匹配时保存为 `.bin`（尽力而为，文件永不丢失）。 |
 | `str` / `bytes`（原始表单字段，不常见） | 以 `"uploaded_file"` 通过 `FileStore.save()` 保存。主要用于向后兼容。 |
 
-**错误策略**：尽力而为。单个文件被拒不影响整个上传。未预期的错误同样记录日志并跳过。
+**错误策略**：尽力而为。单个文件的问题不影响整个上传。未预期的错误记录日志并跳过该文件。
 
 ## 负载格式
 
@@ -71,8 +80,21 @@ request
 }
 ```
 
+## 错误处理
+
+| 条件 | HTTP 状态 | 说明 |
+|---|---|---|
+| `ContentEncodingError` | 415 | 不支持压缩上传 |
+| 文件数量超限 | 413 | `{"error": "文件数量过多（最大：5）", "code": 413}` |
+| MIME 不匹配 | 保存为 `.bin` | 文件重命名为 `.bin`，永不丢失 |
+| MIME 检测失败 | 保存为 `.bin` | 优雅降级 |
+| 其他异常 | 500 | 通用错误兜底 |
+
+**错误消息消毒**：错误消息中的文件名会剥离 `[` 和 `]` 字符，防止 JSON 错误体中的日志注入。
+
 ## 配置
 
 | 常量 | 来源 | 说明 |
 |---|---|---|
 | `_MAX_UPLOAD` | `cfg.max_upload_mb * 1024 * 1024` | `request.form()` 的最大 form part 大小（字节）。 |
+| `_MAX_FILES` | `cfg.max_files_per_request` | 每次请求允许的最大文件数。 |
