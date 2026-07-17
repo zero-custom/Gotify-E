@@ -13,9 +13,7 @@
   function navLang() {
     try {
       var raw = (navigator.language || navigator.userLanguage || '').toLowerCase();
-      // direct match
       if (LANG_MAP[raw]) return LANG_MAP[raw];
-      // prefix match (e.g. 'zh' -> zh_CN, 'en' -> en, 'de' -> en)
       var prefix = raw.split('-')[0];
       return LANG_MAP[prefix] || (prefix === 'en' ? 'en' : null);
     } catch (e) { return null; }
@@ -41,8 +39,7 @@
   var lang = detectLang();
   if (!lang || lang === 'en') return;
 
-  // Prevent CJK wrapping in table headers. Chinese characters are individually
-  // breakable in CSS, so "优先级" wraps to three lines in narrow columns.
+  // Prevent CJK wrapping in table headers
   var css = document.createElement('style');
   css.textContent = 'th.MuiTableCell-head,.MuiTableCell-head{white-space:nowrap!important}';
   document.head.appendChild(css);
@@ -51,15 +48,11 @@
   var applying = false;
   var localeMap = [];
 
-  // Skip text inside elements that contain user data
   function isDataContainer(el) {
     if (!el) return false;
     var tag = el.tagName;
-    // Skip INPUT, TEXTAREA, SELECT, OPTION (user input values)
     if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || tag === 'OPTION') return true;
-    // Skip <td> (table data cells = user data) but allow <th> (table headers = labels)
     if (tag === 'TD') return true;
-    // Skip elements with explicit notranslate class
     var cl = el.className || '';
     if (typeof cl === 'string' && cl.indexOf('notranslate') !== -1) return true;
     return false;
@@ -71,7 +64,6 @@
     if (!parent) return false;
     var tag = parent.tagName;
     if (tag === 'SCRIPT' || tag === 'STYLE') return false;
-    // Check if any ancestor is a data container
     var el = parent;
     while (el) {
       if (isDataContainer(el)) return false;
@@ -80,20 +72,110 @@
     return true;
   }
 
-  // Sort locale map: longest strings first to avoid partial replacement
   function sortLocaleMap() {
     localeMap.sort(function (a, b) { return b[0].length - a[0].length; });
   }
 
-  // Whole-word match: replace only when 'en' appears as a whole word
   function wholeWordReplace(text, en, zh) {
-    // Escape special regex chars in the source string
     var esc = en.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    // Match as whole word: preceded by non-word char or start, followed by non-word char or end
     var re = new RegExp('(^|[^a-zA-Z])' + esc + '($|[^a-zA-Z])', 'g');
     return text.replace(re, function (match, before, after) {
       return before + zh + after;
     });
+  }
+
+  /* ── relative time (Intl.RelativeTimeFormat) ──────────── */
+  // react-timeago on the backend uses locale:'en', so browser renders
+  // English relative times like "5 minutes ago", "1 hour ago", etc.
+  // We catch them via regex since the numeric value varies.  This only works
+  // for <TimeAgo /> nodes that have already rendered; the MutationObserver
+  // re-applies when React re-renders (e.g. ticking to the next minute).
+
+  var UNIT_LONG = {
+    'second': '秒', 'seconds': '秒',
+    'minute': '分钟', 'minutes': '分钟',
+    'hour': '小时', 'hours': '小时',
+    'day': '天', 'days': '天',
+    'week': '周', 'weeks': '周',
+    'month': '个月', 'months': '个月',
+    'year': '年', 'years': '年',
+  };
+
+  // narrow style abbreviations used by Intl.RelativeTimeFormat('en',{style:'narrow'})
+  var UNIT_NARROW = {
+    's': '秒', 'sec': '秒',
+    'm': '分钟', 'min': '分钟',
+    'h': '小时', 'hr': '小时',
+    'd': '天',
+    'w': '周', 'wk': '周',
+    'mo': '个月',
+    'y': '年', 'yr': '年',
+  };
+
+  // Build a regex that matches a period-abbreviated unit and optionally
+  // a trailing 's': "min.", "min", "mins.", "mins" etc.
+  var NARROW_UNIT_SRC = Object.keys(UNIT_NARROW)
+    .map(function (u) { return u.replace(/\./g, '\\.?'); })
+    .join('|');
+
+  function translateRelativeTime(text) {
+    // exact special forms (numeric: 'auto')
+    text = text.replace(/\bjust now\b/gi, '刚刚');
+    text = text.replace(/\ba few seconds ago\b/gi, '几秒前');
+    text = text.replace(/\byesterday\b/gi, '昨天');
+    text = text.replace(/\blast week\b/gi, '上周');
+    text = text.replace(/\blast month\b/gi, '上个月');
+    text = text.replace(/\blast year\b/gi, '去年');
+    text = text.replace(/\btomorrow\b/gi, '明天');
+    text = text.replace(/\bnext week\b/gi, '下周');
+    text = text.replace(/\bnext month\b/gi, '下个月');
+    text = text.replace(/\bnext year\b/gi, '明年');
+
+    // "X unit(s) ago" (long style, e.g. "5 minutes ago")
+    text = text.replace(
+      /(\d+)\s+(seconds?|minutes?|hours?|days?|weeks?|months?|years?)\s+ago/gi,
+      function (m, n, u) {
+        return n + ' ' + (UNIT_LONG[u.toLowerCase()] || u) + '前';
+      }
+    );
+
+    // "X unit(s) ago" (narrow style, e.g. "5 min. ago", "1 wk. ago")
+    text = text.replace(
+      new RegExp('(\\d+)\\s+(' + NARROW_UNIT_SRC + ')\\.?s?\\s+ago', 'gi'),
+      function (m, n, u) {
+        var key = u.toLowerCase().replace(/\./g, '');
+        return n + ' ' + (UNIT_NARROW[key] || u) + '前';
+      }
+    );
+
+    // "Xunit ago" (compact narrow style, e.g. "2d ago", "4w ago")
+    // Matches when the number directly abuts the unit abbreviation.
+    text = text.replace(
+      new RegExp('(\\d+)(' + NARROW_UNIT_SRC + ')\\.?s?\\s+ago', 'gi'),
+      function (m, n, u) {
+        var key = u.toLowerCase().replace(/\./g, '');
+        return n + ' ' + (UNIT_NARROW[key] || u) + '前';
+      }
+    );
+
+    // "in X unit(s)" (long style future, e.g. "in 5 minutes")
+    text = text.replace(
+      /in\s+(\d+)\s+(seconds?|minutes?|hours?|days?|weeks?|months?|years?)/gi,
+      function (m, n, u) {
+        return n + ' ' + (UNIT_LONG[u.toLowerCase()] || u) + '后';
+      }
+    );
+
+    // "in X unit(s)" (narrow style future, e.g. "in 5 min.")
+    text = text.replace(
+      new RegExp('in\\s+(\\d+)\\s+(' + NARROW_UNIT_SRC + ')\\.?s?', 'gi'),
+      function (m, n, u) {
+        var key = u.toLowerCase().replace(/\./g, '');
+        return n + ' ' + (UNIT_NARROW[key] || u) + '后';
+      }
+    );
+
+    return text;
   }
 
   function walkReplace(root) {
@@ -108,6 +190,8 @@
       if (!isRelevant(node)) continue;
       var text = node.nodeValue;
       var modified = false;
+
+      // Pass 1: literal whole-word map replacements
       for (var i = 0; i < localeMap.length; i++) {
         var en = localeMap[i][0];
         var zh = localeMap[i][1];
@@ -119,6 +203,14 @@
           }
         }
       }
+
+      // Pass 2: regex-based relative time translation
+      var rt = translateRelativeTime(text);
+      if (rt !== text) {
+        text = rt;
+        modified = true;
+      }
+
       if (modified) changes.push([node, text]);
     }
 
@@ -148,7 +240,7 @@
       walkReplace(document.body);
       brandGotify();
     });
-    observer.observe(document.body, { childList: true, subtree: true });
+    observer.observe(document.body, { childList: true, subtree: true, characterData: true });
   }
 
   /* ── load locale ──────────────────────────────────────── */

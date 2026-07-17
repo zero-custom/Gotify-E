@@ -84,7 +84,7 @@ Scans the manifest and removes entries older than `pending_timeout_seconds`.
 |---|---|---|
 | `now` | `time.time()` | Injects a reference timestamp for deterministic testing |
 
-For each expired entry: the pending file is deleted (`Path.unlink(missing_ok=True)`) and the manifest entry is dropped. Non-expired entries are preserved.
+For each expired entry: the pending file is deleted (`Path.unlink(missing_ok=True)`) and the manifest entry is dropped. After all entries are processed, any date directories (`{yyyymmdd}/`) that became empty are removed via `Path.rmdir()`. Non-expired entries are preserved.
 
 **Atomic manifest writes**: All methods that rewrite the manifest (`update_status`, `remove_entries`, `clean_expired`) use a tmpfile + `os.replace()` pattern. The new content is written to a `.tmp` file in the same directory, then atomically renamed over the original. This prevents partial/corrupt manifest reads after a crash.
 

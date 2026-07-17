@@ -77,6 +77,16 @@ Uses `shutil.move` for cross-filesystem safety. Silently skips if the staging fi
 
 Deletes a single staging file and its metadata. Called after the Gotify backend returns a non-2xx response.
 
+#### `_rmdir_parents(path: Path) -> None` (static)
+
+Clean up empty leaf directory and its parent after file move/delete. Uses `Path.rmdir()` which only succeeds on empty directories — safe no-op if not empty. Called by both `confirm()` and `cancel()` after file operations complete.
+
+```
+staging/ab/cd/uuid_photo.png  →  leaf = staging/ab/cd/
+  ├─ rmdir(staging/ab/cd/)    ← succeeds if empty
+  └─ rmdir(staging/ab/)       ← succeeds if empty
+```
+
 ## Security
 
 | Check | When | Action |

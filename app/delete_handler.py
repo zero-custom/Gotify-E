@@ -34,9 +34,16 @@ def _collect_auth(request):
 
 async def handle_message_delete(request, http_client, file_store=None, msg_id=None):
     ids = _collect_ids(request, msg_id)
-    if not ids:
-        return await proxy_to_backend(request, method="DELETE", http_client=http_client)
     token, auth_headers = _collect_auth(request)
+
+    if not ids:
+        ids, files_by_id = await _enumerate_all_message_files(token, auth_headers, http_client)
+        if not ids:
+            return await proxy_to_backend(request, method="DELETE", http_client=http_client)
+        return await _store.safe_delete(
+            ids, files_by_id,
+            proxy_to_backend(request, method="DELETE", http_client=http_client),
+        )
 
     async def fetch(mid: int):
         async with _DELETE_CONCURRENCY_SEM:
@@ -109,22 +116,66 @@ async def _fetch_gateway_files(msg_id, token, auth_headers, http_client):
         return []
 
 
-async def _enumerate_app_messages(app_id, token, auth_headers, http_client):
-    path = f"{_BACKEND}/application/{app_id}/message"
-    query = f"?token={token}" if token else ""
-    try:
-        resp = await http_client.request("GET", f"{path}{query}", headers=auth_headers)
+_LIST_LIMIT = 100
+
+
+async def _iter_messages(url, token, auth_headers, http_client, *, paginate=False):
+    since = None
+    while True:
+        query = f"?limit={_LIST_LIMIT}"
+        if since is not None:
+            query += f"&since={since}"
+        query += f"&token={token}" if token else ""
+        try:
+            resp = await http_client.request(
+                "GET", f"{url}{query}", headers=auth_headers,
+            )
+        except Exception:
+            log.warning("iter messages failed for %s", url, exc_info=True)
+            break
         if resp.status_code != 200:
-            return []
+            break
         body = json.loads(resp.content)
         if isinstance(body, dict):
-            return body.get("messages") or []
-        if isinstance(body, list):
-            return body
-        return []
-    except Exception:
-        log.warning("failed to enumerate app %s messages", app_id, exc_info=True)
-        return []
+            messages = body.get("messages") or []
+        elif isinstance(body, list):
+            messages = body
+        else:
+            break
+        if not messages:
+            break
+        for msg in messages:
+            yield msg
+        if not paginate:
+            break
+        paging = body.get("paging") if isinstance(body, dict) else None
+        since = paging.get("since") if isinstance(paging, dict) else None
+        if since is None or len(messages) < _LIST_LIMIT:
+            break
+
+
+async def _enumerate_all_message_files(token, auth_headers, http_client):
+    all_ids: list[int] = []
+    files_by_id: dict[int, list] = {}
+    url = f"{_BACKEND}/message"
+    async for msg in _iter_messages(url, token, auth_headers, http_client, paginate=True):
+        mid = msg.get("id")
+        if mid is None:
+            continue
+        all_ids.append(mid)
+        extras = msg.get("extras") or {}
+        raw = extras.get("gateway::files") or []
+        if raw:
+            files_by_id[mid] = list(raw)
+    return all_ids, files_by_id
+
+
+async def _enumerate_app_messages(app_id, token, auth_headers, http_client):
+    url = f"{_BACKEND}/application/{app_id}/message"
+    messages: list[dict] = []
+    async for msg in _iter_messages(url, token, auth_headers, http_client, paginate=False):
+        messages.append(msg)
+    return messages
 
 
 async def _message_exists(mid, token, auth_headers, http_client):

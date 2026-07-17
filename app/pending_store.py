@@ -126,6 +126,7 @@ class PendingStore:
         entries = self.read_manifest()
         now = now or time.time()
         remaining = []
+        empty_dirs: set[Path] = set()
         for e in entries:
             try:
                 t = datetime.fromisoformat(e.get("time", "")).timestamp()
@@ -134,9 +135,15 @@ class PendingStore:
             if now - t > self._pending_timeout_seconds:
                 p = self._pending_dir / e.get("pending_path", "")
                 p.unlink(missing_ok=True)
+                empty_dirs.add(p.parent)
             else:
                 remaining.append(e)
         self._write_manifest(remaining)
+        for d in empty_dirs:
+            try:
+                d.rmdir()
+            except OSError:
+                pass
 
     async def safe_delete(self, msg_ids: list, files_by_id: dict, delete_coro):
         all_moved = []

@@ -47,6 +47,16 @@ file_store = FileStore(_UPLOAD_DIR, _MARKER_PREFIX, _IMAGE_EXTS, staging_dir=_ST
 _http_client = RealHttpClient()
 
 
+async def _clean_staging_dirs() -> None:
+    for sub_dir in list(_STAGING_DIR.iterdir()):
+        if not sub_dir.is_dir():
+            continue
+        for sub_sub in list(sub_dir.iterdir()):
+            if not sub_sub.is_dir():
+                continue
+            FileStore._rmdir_parents(sub_sub)
+
+
 async def recover_staging() -> None:
     if not _STAGING_DIR.exists():
         return
@@ -73,6 +83,7 @@ async def recover_staging() -> None:
                         recovered += 1
     if recovered:
         log.info("staging recovery: moved %d orphaned files to uploads", recovered)
+    await _clean_staging_dirs()
 
 
 @asynccontextmanager

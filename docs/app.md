@@ -6,7 +6,7 @@ FastAPI application. Defines HTTP routes, body size middleware, WebSocket relay,
 
 `FastAPI` instance created with `title="Gotify[E]"`, versioned (`VERSION` from `config.py`). A `lifespan` context manager manages:
 
-- **Startup**: Runs `recover_staging()` to clean up stale files from a previous crash; creates `cleanup_loop()` asyncio task; runs `recover_on_startup()` to resolve any pending files left from a crash.
+- **Startup**: Runs `recover_staging()` to clean up stale files from a previous crash (also calls `_clean_staging_dirs()` to remove empty staging subdirectories); creates `cleanup_loop()` asyncio task; runs `recover_on_startup()` to resolve any pending files left from a crash.
 - **Shutdown**: Cancels cleanup task; closes `RealHttpClient` connection pool.
 
 A `TokenSanitizingFilter` (from `log_filter.py`) is installed on the root logger at module level to mask credentials in log output.
@@ -93,7 +93,7 @@ _GATEWAY_DIR = Path(__file__).parent.resolve() / GatewayConfig.GATEWAY_DIR_NAME
 ```python
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await recover_staging()                      # clean up stale staging files
+    await recover_staging()                      # clean up stale staging files + empty dirs
     cleanup_task = asyncio.create_task(cleanup_loop())
     await recover_on_startup(_http_client)
     yield

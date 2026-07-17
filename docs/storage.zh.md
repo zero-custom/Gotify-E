@@ -76,6 +76,16 @@ save(filename, body)
 
 删除单个 staging 文件及其元数据。在 Gotify 后端返回非 2xx 后调用。
 
+#### `_rmdir_parents(path: Path) -> None`（静态方法）
+
+文件移出/删除后清理空叶子目录及其父目录。使用 `Path.rmdir()`，仅在目录为空时成功——非空时安全无操作。`confirm()` 和 `cancel()` 在文件操作完成后均会调用。
+
+```
+staging/ab/cd/uuid_photo.png  →  leaf = staging/ab/cd/
+  ├─ rmdir(staging/ab/cd/)    ← 空则成功
+  └─ rmdir(staging/ab/)       ← 空则成功
+```
+
 ## 安全
 
 | 检查 | 时机 | 处理 |

@@ -100,6 +100,17 @@ class FileStore:
             original_name=filename,
         )
 
+    @staticmethod
+    def _rmdir_parents(path: Path) -> None:
+        try:
+            path.rmdir()
+        except OSError:
+            return
+        try:
+            path.parent.rmdir()
+        except OSError:
+            pass
+
     async def confirm(self, stored: StoredFile) -> None:
         if not self.staging_dir:
             return
@@ -109,13 +120,17 @@ class FileStore:
             return
         dst.parent.mkdir(parents=True, exist_ok=True)
         await asyncio.to_thread(shutil.move, str(src), str(dst))
-        meta = self.staging_dir / Path(stored.path).parent / f".{Path(stored.path).name}.meta"
+        leaf = self.staging_dir / Path(stored.path).parent
+        meta = leaf / f".{Path(stored.path).name}.meta"
         meta.unlink(missing_ok=True)
+        self._rmdir_parents(leaf)
 
     def cancel(self, stored: StoredFile) -> None:
         if not self.staging_dir:
             return
         src = self.staging_dir / stored.path
         src.unlink(missing_ok=True)
-        meta = self.staging_dir / Path(stored.path).parent / f".{Path(stored.path).name}.meta"
+        leaf = self.staging_dir / Path(stored.path).parent
+        meta = leaf / f".{Path(stored.path).name}.meta"
         meta.unlink(missing_ok=True)
+        self._rmdir_parents(leaf)
