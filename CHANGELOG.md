@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.1.2 (2026-07-21)
+
+### Changed
+- i18n 扩展至 9 种语言（新增 fr/de/es/pt/ru/it/ko/ja），浏览器自动检测 + `?lang=` 手动指定
+- 翻译引擎重构：`i18n.js` 被动化，相对时间改用 `Intl.RelativeTimeFormat`
+- 布局优化：`main > main{max-width:50vw!important}` 覆盖 DefaultPage 700px 默认宽度
+
 ## 1.1.1 (2026-07-17)
 
 ### Fixed

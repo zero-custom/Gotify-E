@@ -70,11 +70,13 @@ Skips processing when `current_base` is empty or `body` is empty.
 
 ### `inject_i18n(output) -> bytes`
 
-Inserts `<script src="/_gateway/i18n.js"></script>` before `</body>` in HTML responses. Uses `html.parser.HTMLParser` (not regex) to locate the closing body tag.
+Inserts `<script src="/_gateway/i18n.js"></script>` and `<script src="/_gateway/enhance.js"></script>` before `</body>` in HTML responses. Uses `html.parser.HTMLParser` (not regex) to locate the closing body tag.
 
 - Skips injection when no `</body>` is found
 - Logs a warning on `HTMLParseError` and returns the original output
-- Currently the i18n scripts are stub files (no translation data has been populated)
+- Supports **9 languages** of UI translation (Chinese, English, French, German, Spanish, Portuguese, Russian, Italian, Korean, Japanese), auto-detected from `navigator.language` or via `?lang=` query parameter
+- Relative time formatting uses `Intl.RelativeTimeFormat` for automatic locale-aware output
+- See `docs/i18n.md` for details
 
 ### `inject_gateway_info(output) -> bytes`
 

@@ -109,12 +109,16 @@ Bidirectional WebSocket relay between client and Gotify backend `/stream`.
 Client WebSocket ↔ FastAPI ↔ Backend WebSocket (via websockets library)
 ```
 
-On accept, constructs a WebSocket URL from `BACKEND` (http→ws protocol swap) and connects via `websockets.connect`. Two `asyncio` tasks run concurrently:
+On accept, constructs a WebSocket URL from `BACKEND` (http→ws protocol swap). Extracts the `gotify-client-token` from the client's WebSocket cookies and appends it as a `?token=` query parameter — this is necessary because `new WebSocket()` in the browser cannot send custom headers, so the cookie is the only credential vehicle. The `?token=` parameter matches the Gotify backend's first-priority authentication check.
+
+Connects to the backend via `websockets.connect(backend_url)`. Two `asyncio` tasks run concurrently:
 
 - **client_to_backend**: forwards client messages to backend.
 - **backend_to_client**: receives from backend, rewrites file markers via `rewrite_file_urls`, then sends to client.
 
 On disconnect or error, both tasks finish and the client WebSocket is closed in `finally`.
+
+See `docs/websocket_relay.md` for detailed relay logic and `docs/websocket-auth-proxy.zh.md` for the root cause analysis of the WebSocket auth issue.
 
 ### `cleanup_loop` (in `cleanup.py`)
 

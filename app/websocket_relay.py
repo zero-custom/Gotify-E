@@ -20,8 +20,15 @@ async def stream_proxy(websocket: WebSocket):
     qs = websocket.query_params
     ws_backend = _BACKEND.replace("http://", "ws://").replace("https://", "wss://")
     backend_url = f"{ws_backend}/stream"
-    if qs:
-        query_string = "&".join(f"{k}={v}" for k, v in qs.items())
+
+    # 从 cookie 中提取 gotify-client-token 作为查询参数传递
+    params = dict(qs)
+    client_token = websocket.cookies.get("gotify-client-token")
+    if client_token and "token" not in params:
+        params["token"] = client_token
+
+    if params:
+        query_string = "&".join(f"{k}={v}" for k, v in params.items())
         backend_url += f"?{query_string}"
 
     try:

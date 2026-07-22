@@ -31,7 +31,9 @@ Gotify<sup>[E]</sup>  ──HTTP──►  Gotify 后端
 
 | 版本 | 说明 |
 |------|------|
-| **1.1.0** | 当前版本。安全加固（DANGEROUS_EXTS、SVG CSP sandbox、文件名消毒）、配置重构 |
+| **1.1.2** | 当前版本。i18n 扩展（9 种语言、Intl.RelativeTimeFormat 重构）、布局优化 |
+| **1.1.1** | DELETE 全量删除文件清理、暂存目录自动清理、中文翻译补充 |
+| **1.1.0** | 安全加固（DANGEROUS_EXTS、SVG CSP sandbox、文件名消毒）、配置重构 |
 | **1.0.0** | Tornado → FastAPI 迁移。55+25+42 测试体系建立 |
 | **0.1.0** | 初始版本。基于 Tornado 的透明文件网关 |
 
@@ -160,6 +162,35 @@ docker run -d --name=gotify-e \
 | `CLEANUP_INTERVAL_MINUTES` | 暂存目录清理间隔（分钟），默认 `30` |
 | `DELETE_CONCURRENCY` | 应用删除时并发请求数，默认 `10` |
 
+## Multi-Language UI
+
+网关自动将 Gotify 前端翻译为浏览器的首选语言（支持 **9 种语言**）。
+
+### 自动检测
+
+浏览器 `navigator.language` 自动匹配语言，无需配置：
+
+| 浏览器地区 | 语言 | 翻译文件 |
+|---|---|---|
+| `zh` / `zh-CN` / `zh-Hans` | 简体中文 | `lang/zh_CN.js` |
+| `fr` / `fr-FR` / `fr-CA` | Français | `lang/fr.js` |
+| `de` / `de-DE` / `de-AT` | Deutsch | `lang/de.js` |
+| `es` / `es-ES` / `es-MX` | Español | `lang/es.js` |
+| `pt` / `pt-PT` / `pt-BR` | Português | `lang/pt.js` |
+| `ru` / `ru-RU` | Русский | `lang/ru.js` |
+| `it` / `it-IT` / `it-CH` | Italiano | `lang/it.js` |
+| `ko` / `ko-KR` | 한국어 | `lang/ko.js` |
+| `ja` / `ja-JP` | 日本語 | `lang/ja.js` |
+| 其他 | English（fallback） | — |
+
+### 手动指定
+
+通过 URL 查询参数强制指定语言：`http://localhost:8765/?lang=de`
+
+语言选择在 `localStorage` 中持久化，刷新页面后保持。
+
+详见 [`docs/i18n.md`](docs/i18n.md)。
+
 ## 注意事项
 
 ### HTTP 传输层压缩
@@ -212,10 +243,18 @@ docker build -t gotify-e:latest .
 │   ├── storage.py           # 文件存储引擎
 │   ├── config.py            # 配置管理 + 版本号常量
 │   ├── docker.sh            # 容器引导脚本
-│   └── _gateway/            # i18n 本地化脚本
+│       └── _gateway/            # i18n 多语言 UI 层
+│       ├── i18n.js          #   引擎：语言检测 + 文本替换 + Intl 相对时间
+│       ├── enhance.js       #   增强：品牌标记 + 布局 + 时间切换按钮
+│       └── lang/            #   翻译文件
+│           ├── zh_CN.js     #     简体中文（180 条）
+│           ├── en.js        #     英语占位
+│           ├── fr.js / de.js / es.js / pt.js
+│           └── ru.js / it.js / ko.js / ja.js
 ├── docs/                    # 文档（中英双语）
 │   ├── app.md / app.zh.md
 │   ├── config.md / config.zh.md
+│   ├── i18n.md / i18n.zh.md
 │   └── storage.md / storage.zh.md
 ├── Dockerfile               # 生产镜像构建
 ├── docker-compose.yml       # 编排部署

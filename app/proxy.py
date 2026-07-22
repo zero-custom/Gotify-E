@@ -139,7 +139,10 @@ def rewrite_file_urls(body: bytes, current_base: str) -> bytes:
 
 def inject_i18n(output: bytes) -> bytes:
     text = output.decode("utf-8")
-    script_tag = '<script src="/_gateway/i18n.js"></script>'
+    script_tag = (
+        '<script src="/_gateway/i18n.js"></script>'
+        '<script src="/_gateway/enhance.js"></script>'
+    )
 
     lines = text.split("\n")
     line_offsets = [0]

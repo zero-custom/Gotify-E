@@ -4,7 +4,7 @@
 
 FastAPI 反向代理网关，为 Gotify 增加文件存储能力。客户端只需将 Gotify 地址指向网关，无需任何配置变更。
 
-- **版本号**：`1.1.0`（定义在 `app/config.py:VERSION`）
+- **版本号**：`1.1.2`（定义在 `app/config.py:VERSION`）
 - **Python**：3.14+（Docker 使用 Alpine）
 - **端口**：8765
 - **入口点**：`app/app.py:main()` → `uvicorn app:app`
@@ -67,7 +67,7 @@ app/
   storage.py    文件存储：MIME 校验、UUID 嵌套目录、Markdown 链接生成
   config.py     EnvConfig 数据类 + 模块级计算常量 + VERSION
   docker.sh     容器入口脚本，支持运行时安装包（通过环境变量）
-  _gateway/     i18n JS 文件（en.js, zh_CN.js）
+  _gateway/     i18n 多语言 UI 层（i18n.js + enhance.js + lang/*.js）
 ```
 
 注意：`config.py` 的**模块级常量**在导入时计算（`BACKEND`、`PUBLIC_URL`、`UPLOAD_DIR` 等）。编写测试或实例化类时，应直接传入 `EnvConfig` 对象，而非依赖这些全局常量。

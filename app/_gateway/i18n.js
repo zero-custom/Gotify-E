@@ -1,52 +1,10 @@
 (function () {
   'use strict';
 
-  var STORAGE_KEY = 'gotify-lang';
-
-  /* ── navigator.language → locale key ──────────────────── */
-  var LANG_MAP = {
-    'zh-CN': 'zh_CN', 'zh-SG': 'zh_CN',
-    'zh':    'zh_CN',
-    'zh-Hans': 'zh_CN', 'zh-Hans-CN': 'zh_CN',
-    'zh-Hans-SG': 'zh_CN',
-  };
-  function navLang() {
-    try {
-      var raw = (navigator.language || navigator.userLanguage || '').toLowerCase();
-      if (LANG_MAP[raw]) return LANG_MAP[raw];
-      var prefix = raw.split('-')[0];
-      return LANG_MAP[prefix] || (prefix === 'en' ? 'en' : null);
-    } catch (e) { return null; }
-  }
-
-  /* ── lang detection ───────────────────────────────────── */
-  function detectLang() {
-    var m = window.location.search.match(/[?&]lang=([^&]+)/);
-    if (m) {
-      var lang = m[1];
-      try { localStorage.setItem(STORAGE_KEY, lang); } catch (e) {}
-      return lang;
-    }
-    try {
-      var saved = localStorage.getItem(STORAGE_KEY);
-      if (saved) return saved;
-    } catch (e) {}
-    var nav = navLang();
-    if (nav) return nav;
-    return 'en';
-  }
-
-  var lang = detectLang();
-  if (!lang || lang === 'en') return;
-
-  // Prevent CJK wrapping in table headers
-  var css = document.createElement('style');
-  css.textContent = 'th.MuiTableCell-head,.MuiTableCell-head{white-space:nowrap!important}';
-  document.head.appendChild(css);
-
   /* ── engine ────────────────────────────────────────────── */
   var applying = false;
   var localeMap = [];
+  var _rtf = null;   // Intl.RelativeTimeFormat instance for active locale
 
   function isDataContainer(el) {
     if (!el) return false;
@@ -84,94 +42,83 @@
     });
   }
 
-  /* ── relative time (Intl.RelativeTimeFormat) ──────────── */
-  // react-timeago on the backend uses locale:'en', so browser renders
-  // English relative times like "5 minutes ago", "1 hour ago", etc.
-  // We catch them via regex since the numeric value varies.  This only works
-  // for <TimeAgo /> nodes that have already rendered; the MutationObserver
-  // re-applies when React re-renders (e.g. ticking to the next minute).
-
-  var UNIT_LONG = {
-    'second': '秒', 'seconds': '秒',
-    'minute': '分钟', 'minutes': '分钟',
-    'hour': '小时', 'hours': '小时',
-    'day': '天', 'days': '天',
-    'week': '周', 'weeks': '周',
-    'month': '个月', 'months': '个月',
-    'year': '年', 'years': '年',
+  /* ── relative time via Intl.RelativeTimeFormat ──────────── */
+  // Maps English unit words (full + abbreviation) to Intl unit identifiers.
+  // This is the only language-specific mapping needed — it parses the
+  // English output that react-timeago (locale:'en') renders, then
+  // Intl.RelativeTimeFormat handles translation to any target language.
+  var ENG_UNIT = {
+    'second': 'second', 'seconds': 'second',
+    'sec': 'second', 'secs': 'second', 's': 'second',
+    'minute': 'minute', 'minutes': 'minute',
+    'min': 'minute', 'mins': 'minute', 'm': 'minute',
+    'hour': 'hour', 'hours': 'hour',
+    'hr': 'hour', 'hrs': 'hour', 'h': 'hour',
+    'day': 'day', 'days': 'day', 'd': 'day',
+    'week': 'week', 'weeks': 'week',
+    'wk': 'week', 'wks': 'week', 'w': 'week',
+    'month': 'month', 'months': 'month',
+    'mo': 'month', 'mos': 'month',
+    'year': 'year', 'years': 'year',
+    'yr': 'year', 'yrs': 'year', 'y': 'year',
   };
 
-  // narrow style abbreviations used by Intl.RelativeTimeFormat('en',{style:'narrow'})
-  var UNIT_NARROW = {
-    's': '秒', 'sec': '秒',
-    'm': '分钟', 'min': '分钟',
-    'h': '小时', 'hr': '小时',
-    'd': '天',
-    'w': '周', 'wk': '周',
-    'mo': '个月',
-    'y': '年', 'yr': '年',
-  };
-
-  // Build a regex that matches a period-abbreviated unit and optionally
-  // a trailing 's': "min.", "min", "mins.", "mins" etc.
-  var NARROW_UNIT_SRC = Object.keys(UNIT_NARROW)
-    .map(function (u) { return u.replace(/\./g, '\\.?'); })
+  // Sort abbreviations longest-first so "wk" matches before "w", "min" before "m", etc.
+  var ENG_ABBR = Object.keys(ENG_UNIT)
+    .filter(function (k) { return k.length <= 4; })
+    .sort(function (a, b) { return b.length - a.length; })
+    .map(function (k) { return k.replace(/\./g, '\\.?'); })
     .join('|');
 
+  function engUnit(raw) {
+    var key = raw.toLowerCase().replace(/\./g, '');
+    return ENG_UNIT[key] || ENG_UNIT[key.replace(/s$/, '')] || null;
+  }
+
+  function rtfFormat(n, unit) {
+    return _rtf ? _rtf.format(n, unit) : '';
+  }
+
   function translateRelativeTime(text) {
-    // exact special forms (numeric: 'auto')
-    text = text.replace(/\bjust now\b/gi, '刚刚');
-    text = text.replace(/\ba few seconds ago\b/gi, '几秒前');
-    text = text.replace(/\byesterday\b/gi, '昨天');
-    text = text.replace(/\blast week\b/gi, '上周');
-    text = text.replace(/\blast month\b/gi, '上个月');
-    text = text.replace(/\blast year\b/gi, '去年');
-    text = text.replace(/\btomorrow\b/gi, '明天');
-    text = text.replace(/\bnext week\b/gi, '下周');
-    text = text.replace(/\bnext month\b/gi, '下个月');
-    text = text.replace(/\bnext year\b/gi, '明年');
+    if (!_rtf) return text;
 
-    // "X unit(s) ago" (long style, e.g. "5 minutes ago")
+    // "just now" → 0 seconds
+    text = text.replace(/\bjust now\b/gi, rtfFormat(0, 'second'));
+
+    // "a few seconds ago" → approximate -5 seconds
+    text = text.replace(/\ba few seconds ago\b/gi, rtfFormat(-5, 'second'));
+
+    // special-word forms
+    text = text.replace(/\byesterday\b/gi, rtfFormat(-1, 'day'));
+    text = text.replace(/\blast week\b/gi, rtfFormat(-1, 'week'));
+    text = text.replace(/\blast month\b/gi, rtfFormat(-1, 'month'));
+    text = text.replace(/\blast year\b/gi, rtfFormat(-1, 'year'));
+
+    // "last/next" + abbreviated unit (e.g. "last wk.", "next mo.")
     text = text.replace(
-      /(\d+)\s+(seconds?|minutes?|hours?|days?|weeks?|months?|years?)\s+ago/gi,
-      function (m, n, u) {
-        return n + ' ' + (UNIT_LONG[u.toLowerCase()] || u) + '前';
+      new RegExp('\\b(last|next)\\s+(' + ENG_ABBR + ')\\.?', 'gi'),
+      function (m, direction, u) {
+        var unit = engUnit(u) || 'day';
+        var n = direction.toLowerCase() === 'last' ? -1 : 1;
+        return rtfFormat(n, unit);
       }
     );
 
-    // "X unit(s) ago" (narrow style, e.g. "5 min. ago", "1 wk. ago")
+    // "X unit(s) ago" (with space, e.g. "5 minutes ago", "5 min. ago")
     text = text.replace(
-      new RegExp('(\\d+)\\s+(' + NARROW_UNIT_SRC + ')\\.?s?\\s+ago', 'gi'),
-      function (m, n, u) {
-        var key = u.toLowerCase().replace(/\./g, '');
-        return n + ' ' + (UNIT_NARROW[key] || u) + '前';
+      /(\d+)\s+([a-zA-Z]+\.?s?)\s+ago/gi,
+      function (m, num, unit) {
+        var u = engUnit(unit);
+        return u ? rtfFormat(-parseInt(num, 10), u) : m;
       }
     );
 
-    // "Xunit ago" (compact narrow style, e.g. "2d ago", "4w ago")
-    // Matches when the number directly abuts the unit abbreviation.
+    // compact narrow: "2d ago", "5min ago" (no space between number and unit)
     text = text.replace(
-      new RegExp('(\\d+)(' + NARROW_UNIT_SRC + ')\\.?s?\\s+ago', 'gi'),
-      function (m, n, u) {
-        var key = u.toLowerCase().replace(/\./g, '');
-        return n + ' ' + (UNIT_NARROW[key] || u) + '前';
-      }
-    );
-
-    // "in X unit(s)" (long style future, e.g. "in 5 minutes")
-    text = text.replace(
-      /in\s+(\d+)\s+(seconds?|minutes?|hours?|days?|weeks?|months?|years?)/gi,
-      function (m, n, u) {
-        return n + ' ' + (UNIT_LONG[u.toLowerCase()] || u) + '后';
-      }
-    );
-
-    // "in X unit(s)" (narrow style future, e.g. "in 5 min.")
-    text = text.replace(
-      new RegExp('in\\s+(\\d+)\\s+(' + NARROW_UNIT_SRC + ')\\.?s?', 'gi'),
-      function (m, n, u) {
-        var key = u.toLowerCase().replace(/\./g, '');
-        return n + ' ' + (UNIT_NARROW[key] || u) + '后';
+      /(\d+)([a-zA-Z]{1,4}\.?s?)\s+ago/gi,
+      function (m, num, unit) {
+        var u = engUnit(unit);
+        return u ? rtfFormat(-parseInt(num, 10), u) : m;
       }
     );
 
@@ -179,7 +126,8 @@
   }
 
   function walkReplace(root) {
-    if (applying || !localeMap.length) return;
+    if (applying) return;
+    if (!localeMap.length && !_rtf) return;
 
     sortLocaleMap();
 
@@ -191,24 +139,28 @@
       var text = node.nodeValue;
       var modified = false;
 
-      // Pass 1: literal whole-word map replacements
-      for (var i = 0; i < localeMap.length; i++) {
-        var en = localeMap[i][0];
-        var zh = localeMap[i][1];
-        if (text.indexOf(en) !== -1) {
-          var newText = wholeWordReplace(text, en, zh);
-          if (newText !== text) {
-            text = newText;
-            modified = true;
+      if (localeMap.length) {
+        // Pass 1: literal whole-word map replacements
+        for (var i = 0; i < localeMap.length; i++) {
+          var en = localeMap[i][0];
+          var zh = localeMap[i][1];
+          if (text.indexOf(en) !== -1) {
+            var newText = wholeWordReplace(text, en, zh);
+            if (newText !== text) {
+              text = newText;
+              modified = true;
+            }
           }
         }
       }
 
-      // Pass 2: regex-based relative time translation
-      var rt = translateRelativeTime(text);
-      if (rt !== text) {
-        text = rt;
-        modified = true;
+      // Pass 2: relative time via Intl.RelativeTimeFormat
+      if (_rtf) {
+        var rt = translateRelativeTime(text);
+        if (rt !== text) {
+          text = rt;
+          modified = true;
+        }
       }
 
       if (modified) changes.push([node, text]);
@@ -223,42 +175,85 @@
     }
   }
 
-  function brandGotify() {
-    var h5s = document.querySelectorAll('h5');
-    for (var i = 0; i < h5s.length; i++) {
-      if (h5s[i].textContent.trim() === 'Gotify') {
-        h5s[i].innerHTML = 'Gotify<sup style="font-size:.6em">[E]</sup>';
+  /* ── language detection ─────────────────────────────────── */
+  var STORAGE_KEY = 'gotify-lang';
+
+  // Normalises short/alias locale codes to the file name used on disk.
+  var NORM = {
+    'zh': 'zh_CN',
+    'zh-cn': 'zh_CN', 'zh-sg': 'zh_CN',
+    'zh-hans': 'zh_CN', 'zh-hans-cn': 'zh_CN', 'zh-hans-sg': 'zh_CN',
+    'fr': 'fr', 'fr-fr': 'fr', 'fr-ca': 'fr', 'fr-ch': 'fr', 'fr-be': 'fr',
+    'de': 'de', 'de-de': 'de', 'de-at': 'de', 'de-ch': 'de',
+    'es': 'es', 'es-es': 'es', 'es-mx': 'es', 'es-ar': 'es',
+    'pt': 'pt', 'pt-pt': 'pt', 'pt-br': 'pt',
+    'ru': 'ru', 'ru-ru': 'ru',
+    'it': 'it', 'it-it': 'it', 'it-ch': 'it',
+    'ko': 'ko', 'ko-kr': 'ko',
+    'ja': 'ja', 'ja-jp': 'ja',
+  };
+
+  function detectLang() {
+    var m = window.location.search.match(/[?&]lang=([^&]+)/);
+    if (m) return NORM[m[1].toLowerCase()] || m[1];
+    try {
+      var saved = localStorage.getItem(STORAGE_KEY);
+      if (saved) return saved;
+    } catch (e) {}
+    try {
+      var raw = (navigator.language || navigator.userLanguage || '').toLowerCase();
+      if (raw.indexOf('zh') === 0) return 'zh_CN';
+      if (raw.indexOf('de') === 0) return 'de';
+      if (raw.indexOf('fr') === 0) return 'fr';
+      if (raw.indexOf('es') === 0) return 'es';
+      if (raw.indexOf('pt') === 0) return 'pt';
+      if (raw.indexOf('ru') === 0) return 'ru';
+      if (raw.indexOf('it') === 0) return 'it';
+      if (raw.indexOf('ko') === 0) return 'ko';
+      if (raw.indexOf('ja') === 0) return 'ja';
+    } catch (e) {}
+    return 'en';
+  }
+
+  /* ── helper: safe Intl.RelativeTimeFormat creation ──────── */
+  function createRtf(lang) {
+    try {
+      _rtf = new Intl.RelativeTimeFormat(lang.replace(/_/g, '-'), { numeric: 'auto' });
+    } catch (e) {
+      _rtf = null;
+    }
+  }
+
+  /* ── public API (called by enhance.js) ─────────────────── */
+  window.__i18n = {
+    walkReplace: walkReplace,
+    detectLang: detectLang,
+
+    activate: function (lang) {
+      // Prevent CJK wrapping in table headers
+      var css = document.createElement('style');
+      css.textContent = 'th.MuiTableCell-head,.MuiTableCell-head{white-space:nowrap!important}';
+      document.head.appendChild(css);
+
+      if (window.__LOCALE_MAP) {
+        localeMap = window.__LOCALE_MAP;
+        createRtf(lang);
+        if (document.body) walkReplace(document.body);
         return;
       }
-    }
-  }
-
-  function startObserver() {
-    walkReplace(document.body);
-    brandGotify();
-    var observer = new MutationObserver(function () {
-      walkReplace(document.body);
-      brandGotify();
-    });
-    observer.observe(document.body, { childList: true, subtree: true, characterData: true });
-  }
-
-  /* ── load locale ──────────────────────────────────────── */
-  var script = document.createElement('script');
-  script.src = '/_gateway/' + lang + '.js';
-  script.onload = function () {
-    localeMap = window.__LOCALE_MAP || [];
-    if (document.readyState === 'loading') {
-      document.addEventListener('DOMContentLoaded', function () {
-        setTimeout(startObserver, 400);
-      });
-    } else {
-      setTimeout(startObserver, 400);
+      var script = document.createElement('script');
+      script.src = '/_gateway/lang/' + lang + '.js';
+      script.onload = function () {
+        localeMap = window.__LOCALE_MAP || [];
+        createRtf(lang);
+        if (document.body) walkReplace(document.body);
+      };
+      script.onerror = function () {
+        console.warn('Gotify locale not found: ' + lang);
+        _rtf = null;
+        try { localStorage.removeItem('gotify-lang'); } catch (e) {}
+      };
+      document.head.appendChild(script);
     }
   };
-  script.onerror = function () {
-    console.warn('Gotify locale not found: ' + lang);
-    try { localStorage.removeItem(STORAGE_KEY); } catch (e) {}
-  };
-  document.head.appendChild(script);
 })();

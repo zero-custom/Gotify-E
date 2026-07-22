@@ -109,12 +109,16 @@ async def lifespan(app: FastAPI):
 客户端 WebSocket ↔ FastAPI ↔ 后端 WebSocket (通过 websockets 库)
 ```
 
-接受连接后，将 `BACKEND` 地址做 http→ws 协议转换，通过 `websockets.connect` 连接后端。两个 `asyncio` 任务并发运行：
+接受连接后，将 `BACKEND` 地址做 http→ws 协议转换。从客户端的 WebSocket cookie 中提取 `gotify-client-token`，作为 `?token=` 查询参数传递给后端——这是因为浏览器 `new WebSocket()` 无法发送自定义请求头，cookie 是唯一的凭据载体。`?token=` 查询参数与 Gotify 后端的最高优级认证检查相匹配。
+
+通过 `websockets.connect(backend_url)` 连接后端。两个 `asyncio` 任务并发运行：
 
 - **client_to_backend**：将客户端消息转发到后端。
 - **backend_to_client**：接收后端消息，通过 `rewrite_file_urls` 改写文件标记，然后发送给客户端。
 
 断开或出错时两个任务结束，`finally` 块关闭客户端 WebSocket。
+
+详见 `docs/websocket_relay.zh.md` 了解中继逻辑，及 `docs/websocket-auth-proxy.zh.md` 了解 WebSocket 认证问题的根因分析。
 
 ### `cleanup_loop`（位于 `cleanup.py`）
 

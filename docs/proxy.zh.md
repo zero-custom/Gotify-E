@@ -70,11 +70,13 @@ class HttpClient(Protocol):
 
 ### `inject_i18n(output) -> bytes`
 
-在 HTML 响应的 `</body>` 之前插入 `<script src="/_gateway/i18n.js"></script>`。使用 `html.parser.HTMLParser`（非正则）定位闭合 body 标签。
+在 HTML 响应的 `</body>` 之前注入 `<script src="/_gateway/i18n.js"></script>` 和 `<script src="/_gateway/enhance.js"></script>`。使用 `html.parser.HTMLParser`（非正则）定位闭合 body 标签。
 
 - 未找到 `</body>` 时跳过注入
 - `HTMLParseError` 时记录警告并返回原始输出
-- 目前 i18n 脚本为占位文件（尚无翻译数据）
+- 支持 **9 种语言**的 UI 翻译（中文、英语、法语、德语、西班牙语、葡萄牙语、俄语、意大利语、韩语、日语），通过浏览器 `navigator.language` 自动检测或 `?lang=` 查询参数指定
+- 相对时间使用 `Intl.RelativeTimeFormat` 实现，自动适配检测到的语言
+- 详见 `docs/i18n.zh.md`
 
 ### `inject_gateway_info(output) -> bytes`
 

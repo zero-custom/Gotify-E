@@ -58,4 +58,4 @@ class GatewayConfig:
     }
 
     GATEWAY_DIR_NAME = "_gateway"
-    VERSION = "1.1.1"
+    VERSION = "1.1.2"
