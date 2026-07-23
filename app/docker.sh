@@ -43,21 +43,26 @@ pip_mirror = os.environ.get('PIP_MIRROR', '')
 python_path = os.environ.get('PYTHON', 'python3')
 install_pip_env = os.environ.get('INSTALL_PIP_PACKAGES', '')
 
-package_list = [pkg.strip() for pkg in install_pip_env.split('|') if pkg.strip()]
+entries = [pkg.strip() for pkg in install_pip_env.split('|') if pkg.strip()]
 
-for package_name in package_list:
+for entry in entries:
+    if ':' in entry:
+        import_name, pip_name = entry.split(':', 1)
+    else:
+        import_name = pip_name = entry
+
     try:
-        __import__(package_name)
-        print(f'{package_name} already installed')
+        __import__(import_name)
+        print(f'{import_name} already installed')
     except ImportError:
         try:
-            cmd = [python_path, '-m', 'pip', 'install', '--break-system-packages', '--root-user-action', 'ignore', package_name]
+            cmd = [python_path, '-m', 'pip', 'install', '--break-system-packages', '--root-user-action', 'ignore', pip_name]
             if pip_mirror:
                 cmd.extend(['-i', pip_mirror])
             subprocess.check_call(cmd)
-            print(f'Installed {package_name}')
+            print(f'Installed {pip_name} (import as {import_name})')
         except Exception as e:
-            print(f'Error installing {package_name}: {str(e)}')
+            print(f'Error installing {pip_name}: {str(e)}')
             break
 "
 fi
